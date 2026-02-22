@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import time
 import uuid
@@ -9,6 +10,10 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+# Avoid Wayland plugin issues on Raspberry Pi OpenCV Qt builds.
+if os.name == "posix":
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 import cv2
 import numpy as np
@@ -773,6 +778,10 @@ def main() -> None:
     parser.add_argument("--no-reuse-eye-calibration", action="store_true")
     parser.add_argument("--no-save-eye-calibration", action="store_true")
     args = parser.parse_args()
+
+    if args.show_windows and (not os.environ.get("DISPLAY")) and (not os.environ.get("WAYLAND_DISPLAY")):
+        print("[Bridge] No desktop display detected; disabling --show-windows.")
+        args.show_windows = False
 
     state = SharedState()
     app = create_app(state)
