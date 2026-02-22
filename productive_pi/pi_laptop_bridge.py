@@ -112,6 +112,18 @@ class SharedState:
         self.latest_frame_ts: float = 0.0
         self.commands: deque[Command] = deque(maxlen=128)
         self.audio: dict[str, bytes] = {}
+        self.metrics: dict = {
+            "user_in_frame": None,
+            "gaze_centered": None,
+            "off_task": None,
+            "off_task_seconds": 0.0,
+            "posture_enabled": None,
+            "posture_calibrated": None,
+            "posture_good": None,
+            "posture_slouch_seconds": 0.0,
+            "last_alert": "",
+            "updated_at": 0.0,
+        }
 
     def set_frame(self, frame: np.ndarray) -> None:
         with self.lock:
@@ -146,6 +158,15 @@ class SharedState:
     def get_audio(self, audio_id: str) -> Optional[bytes]:
         with self.lock:
             return self.audio.get(audio_id)
+
+    def set_metrics(self, **kwargs) -> None:
+        with self.lock:
+            self.metrics.update(kwargs)
+            self.metrics["updated_at"] = time.monotonic()
+
+    def get_metrics(self) -> dict:
+        with self.lock:
+            return dict(self.metrics)
 
 
 def generate_elevenlabs_audio(text: str) -> Optional[bytes]:
@@ -251,18 +272,21 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int) -> None:
                 msg = CONFIG.first_alert_message if not first_alert_fired else CONFIG.repeat_alert_message
                 enqueue_speak(state, msg)
                 print(f"[Bridge] Off-task alert at {next_alert_elapsed:.1f}s")
+                state.set_metrics(last_alert=f"off_task:{next_alert_elapsed:.1f}s")
                 first_alert_fired = True
                 next_alert_elapsed += CONFIG.repeat_alert_seconds
         else:
             distracted_since = None
             first_alert_fired = False
             next_alert_elapsed = CONFIG.first_alert_seconds
+            distracted_for = 0.0
 
         # Posture (pi external cam)
         if posture_cap.isOpened() and posture.enabled:
             ok_posture, pframe = posture_cap.read()
             if ok_posture:
                 pres = posture.process(pframe)
+                slouch_for = 0.0
                 if pres.enabled and pres.calibrated and pres.good_posture is not None:
                     if not pres.good_posture:
                         posture_good_since = None
@@ -272,6 +296,7 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int) -> None:
                         if slouch_for >= CONFIG.posture_slouch_alert_seconds and not slouch_alert_sent:
                             enqueue_speak(state, CONFIG.posture_alert_message)
                             print(f"[Bridge] Posture alert at {slouch_for:.1f}s")
+                            state.set_metrics(last_alert=f"posture:{slouch_for:.1f}s")
                             slouch_alert_sent = True
                     else:
                         if posture_good_since is None:
@@ -279,6 +304,23 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int) -> None:
                         if (now - posture_good_since) >= CONFIG.posture_recover_reset_seconds:
                             slouch_since = None
                             slouch_alert_sent = False
+            else:
+                pres = None
+                slouch_for = 0.0
+        else:
+            pres = None
+            slouch_for = 0.0
+
+        state.set_metrics(
+            user_in_frame=bool(vis.user_in_frame),
+            gaze_centered=bool(vis.gaze_centered),
+            off_task=bool(off_task),
+            off_task_seconds=float(distracted_for),
+            posture_enabled=bool(posture.enabled and posture_cap.isOpened()),
+            posture_calibrated=(None if pres is None else bool(pres.calibrated)),
+            posture_good=(None if pres is None else pres.good_posture),
+            posture_slouch_seconds=float(slouch_for),
+        )
 
         time.sleep(0.03)
 
@@ -322,6 +364,23 @@ def create_app(state: SharedState) -> Flask:
     def health():
         _, ts = state.get_frame()
         return jsonify({"ok": True, "last_frame_age_sec": time.monotonic() - ts if ts else None})
+
+    @app.get("/api/state")
+    def api_state():
+        _, ts = state.get_frame()
+        out = state.get_metrics()
+        out["last_frame_age_sec"] = (time.monotonic() - ts) if ts else None
+        return jsonify(out)
+
+    @app.post("/api/test_speak")
+    def test_speak():
+        payload = request.get_json(silent=True) or {}
+        text = str(payload.get("text", "Bridge test audio")).strip()
+        if not text:
+            return jsonify({"ok": False, "error": "empty text"}), 400
+        enqueue_speak(state, text)
+        state.set_metrics(last_alert="manual_test")
+        return jsonify({"ok": True, "queued_text": text})
 
     return app
 
