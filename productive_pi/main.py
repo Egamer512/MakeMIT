@@ -1,18 +1,20 @@
 import argparse
 import time
+from typing import Optional
 
 import cv2
 
 from .config import CONFIG
 from .coach import CoachConfig, ProductivityCoach
 from .lcd import LcdDisplay
+from .speech import VoiceAlerter, VoiceConfig
 from .state import ProductivityState
-from .vision import PhoneDetector, VisionEngine
+from .vision import VisionEngine
 
 
 def format_lcd(state: ProductivityState) -> tuple[str, str]:
     line1 = f"{state.status_label():<9} {state.focus_score:5.1f}"
-    line2 = f"U:{int(state.user_in_frame)} P:{int(state.phone_detected)} G:{int(state.gaze_centered)}"
+    line2 = f"U:{int(state.user_in_frame)} G:{int(state.gaze_centered)}"
     return line1, line2
 
 
@@ -33,7 +35,6 @@ def run(show_window: bool, fullscreen: bool) -> None:
         raise RuntimeError("Could not open camera. Check CAMERA_INDEX and camera wiring.")
 
     vision = VisionEngine(min_face_conf=CONFIG.min_face_conf)
-    phone_detector = PhoneDetector(enabled=CONFIG.yolo_enabled, model_path=str(CONFIG.yolo_model_path))
 
     coach = ProductivityCoach(
         CoachConfig(
@@ -50,9 +51,30 @@ def run(show_window: bool, fullscreen: bool) -> None:
         cols=CONFIG.lcd_cols,
         rows=CONFIG.lcd_rows,
     )
+    voice = VoiceAlerter(
+        VoiceConfig(
+            enabled=CONFIG.voice_enabled,
+            backend="elevenlabs" if CONFIG.elevenlabs_enabled else CONFIG.voice_backend,
+            local_voice_name=CONFIG.local_voice_name,
+            api_key=CONFIG.elevenlabs_api_key,
+            voice_id=CONFIG.elevenlabs_voice_id,
+            model_id=CONFIG.elevenlabs_model_id,
+            elevenlabs_fallback_local=CONFIG.elevenlabs_fallback_local,
+            debug=CONFIG.voice_debug,
+            trigger_seconds=CONFIG.distraction_trigger_seconds,
+            cooldown_seconds=CONFIG.distraction_voice_cooldown_seconds,
+        )
+    )
+    if CONFIG.voice_test_on_start:
+        voice.maybe_speak("Voice system ready.", force=True)
 
     state = ProductivityState()
     last = time.monotonic()
+    distracted_since: Optional[float] = None
+    on_task_since: Optional[float] = None
+    gaze_off_since: Optional[float] = None
+    ten_second_alert_sent = False
+    thirty_second_alert_sent = False
 
     if show_window:
         cv2.namedWindow("Productivity Pi", cv2.WINDOW_NORMAL)
@@ -71,18 +93,57 @@ def run(show_window: bool, fullscreen: bool) -> None:
             last = now
 
             vis = vision.process(frame)
-            phone = phone_detector.detect(vis.frame)
 
             state.user_in_frame = vis.user_in_frame
             state.eye_openness = vis.eye_openness
             state.gaze_centered = vis.gaze_centered
-            state.phone_detected = phone
+            state.phone_detected = False
             state.update_focus(
                 dt,
                 focus_up=CONFIG.focus_up_per_sec,
                 focus_down=CONFIG.focus_down_per_sec,
                 phone_penalty=CONFIG.focus_phone_penalty,
             )
+
+            blink_now = state.user_in_frame and (state.eye_openness > 0.0) and (
+                state.eye_openness < CONFIG.blink_eye_openness_threshold
+            )
+
+            if not state.user_in_frame:
+                gaze_off_since = None
+                gaze_off_long = False
+            else:
+                if state.gaze_centered or blink_now:
+                    gaze_off_since = None
+                    gaze_off_long = False
+                else:
+                    if gaze_off_since is None:
+                        gaze_off_since = now
+                    gaze_off_long = (now - gaze_off_since) >= CONFIG.gaze_off_grace_seconds
+
+            off_task = (not state.user_in_frame) or gaze_off_long
+            if off_task:
+                on_task_since = None
+                if distracted_since is None:
+                    distracted_since = now
+                distracted_for = now - distracted_since
+                if distracted_for >= 10.0 and not ten_second_alert_sent:
+                    voice.maybe_speak("Hey Anfal, Please stay on task, remember that your pset is due soon!", force=True)
+                    print("[Voice] Triggered 10s off-task alert.")
+                    ten_second_alert_sent = True
+                if distracted_for >= 30.0 and not thirty_second_alert_sent:
+                    voice.maybe_speak("ANFAL! GET BACK TO WORK NOW.", force=True)
+                    print("[Voice] Triggered 30s off-task alert.")
+                    thirty_second_alert_sent = True
+            else:
+                if on_task_since is None:
+                    on_task_since = now
+                on_task_for = now - on_task_since
+                if on_task_for >= CONFIG.off_task_reset_seconds:
+                    distracted_since = None
+                    ten_second_alert_sent = False
+                    thirty_second_alert_sent = False
+                distracted_for = 0.0
 
             tip = coach.maybe_generate_tip(state)
             if tip:
@@ -104,8 +165,16 @@ def run(show_window: bool, fullscreen: bool) -> None:
                     (50, 220, 255),
                     2,
                 )
-            if phone:
-                cv2.putText(vis.frame, "PHONE DETECTED", (20, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            if off_task:
+                cv2.putText(
+                    vis.frame,
+                    f"Off-task: {distracted_for:0.1f}s",
+                    (20, 280),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 120, 255),
+                    2,
+                )
 
             if show_window:
                 cv2.imshow("Productivity Pi", vis.frame)

@@ -126,9 +126,28 @@ class VisionEngine:
 
 
 class PhoneDetector:
-    def __init__(self, enabled: bool, model_path: str):
+    def __init__(
+        self,
+        enabled: bool,
+        model_path: str,
+        conf_threshold: float = 0.55,
+        min_area_ratio: float = 0.01,
+        center_x_margin: float = 0.15,
+        min_center_y_ratio: float = 0.30,
+        on_frames: int = 10,
+        off_frames: int = 6,
+    ):
         self.enabled = enabled
         self.model = None
+        self.conf_threshold = conf_threshold
+        self.min_area_ratio = min_area_ratio
+        self.center_x_margin = center_x_margin
+        self.min_center_y_ratio = min_center_y_ratio
+        self.on_frames = max(1, on_frames)
+        self.off_frames = max(1, off_frames)
+        self._phone_on = False
+        self._pos_streak = 0
+        self._neg_streak = 0
         if not enabled:
             return
 
@@ -140,24 +159,75 @@ class PhoneDetector:
             self.enabled = False
             print(f"[PhoneDetector] Disabled: {exc}")
 
-    def detect(self, frame: np.ndarray) -> bool:
+    def _is_valid_phone_box(self, xyxy, conf: float, frame_w: int, frame_h: int) -> bool:
+        if conf < self.conf_threshold:
+            return False
+        x1, y1, x2, y2 = [float(v) for v in xyxy]
+        bw = max(0.0, x2 - x1)
+        bh = max(0.0, y2 - y1)
+        if bw <= 0.0 or bh <= 0.0:
+            return False
+
+        area_ratio = (bw * bh) / max(1.0, float(frame_w * frame_h))
+        if area_ratio < self.min_area_ratio:
+            return False
+
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+
+        # Ignore tiny edge detections and very high detections (often false positives).
+        if cx < frame_w * self.center_x_margin or cx > frame_w * (1.0 - self.center_x_margin):
+            return False
+        if cy < frame_h * self.min_center_y_ratio:
+            return False
+        return True
+
+    def _debounce(self, instant_detect: bool) -> bool:
+        if instant_detect:
+            self._pos_streak += 1
+            self._neg_streak = 0
+        else:
+            self._neg_streak += 1
+            self._pos_streak = 0
+
+        if not self._phone_on and self._pos_streak >= self.on_frames:
+            self._phone_on = True
+        elif self._phone_on and self._neg_streak >= self.off_frames:
+            self._phone_on = False
+
+        return self._phone_on
+
+    def detect(self, frame: np.ndarray, user_in_frame: bool = True) -> bool:
         if not self.enabled or self.model is None:
             return False
 
+        if not user_in_frame:
+            return self._debounce(False)
+
+        frame_h, frame_w = frame.shape[:2]
+        instant_detect = False
         try:
-            results = self.model.predict(frame, verbose=False, conf=0.35)
+            results = self.model.predict(frame, verbose=False, conf=self.conf_threshold)
             if not results:
-                return False
-            boxes = results[0].boxes
-            if boxes is None:
-                return False
+                return self._debounce(False)
+            result = results[0]
+            boxes = result.boxes
+            if boxes is None or boxes.cls is None:
+                return self._debounce(False)
 
-            names = results[0].names
-            for cls_idx in boxes.cls.tolist():
+            names = result.names
+            cls_list = boxes.cls.tolist()
+            conf_list = boxes.conf.tolist() if boxes.conf is not None else [1.0] * len(cls_list)
+            xyxy_list = boxes.xyxy.tolist() if boxes.xyxy is not None else []
+
+            for cls_idx, conf, xyxy in zip(cls_list, conf_list, xyxy_list):
                 label = names.get(int(cls_idx), "") if isinstance(names, dict) else ""
-                if str(label).lower() in {"cell phone", "mobile phone", "phone"}:
-                    return True
+                if str(label).lower() in {"cell phone", "mobile phone", "phone"} and self._is_valid_phone_box(
+                    xyxy, float(conf), frame_w, frame_h
+                ):
+                    instant_detect = True
+                    break
         except Exception:
-            return False
+            return self._debounce(False)
 
-        return False
+        return self._debounce(instant_detect)

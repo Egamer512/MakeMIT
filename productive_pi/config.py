@@ -3,6 +3,25 @@ from pathlib import Path
 import os
 
 
+def _load_env_file() -> None:
+    env_path = Path(os.getenv("APP_ENV_FILE", ".env"))
+    if not env_path.exists() or not env_path.is_file():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        # Keep explicit shell exports higher priority than file values.
+        os.environ.setdefault(key, value)
+
+
+_load_env_file()
+
+
 @dataclass
 class AppConfig:
     camera_index: int = int(os.getenv("CAMERA_INDEX", "0"))
@@ -30,6 +49,29 @@ class AppConfig:
     # Optional YOLO model for phone detection
     yolo_enabled: bool = os.getenv("YOLO_ENABLED", "1") == "1"
     yolo_model_path: Path = Path(os.getenv("YOLO_MODEL_PATH", "models/yolov8n.pt"))
+    yolo_phone_conf: float = float(os.getenv("YOLO_PHONE_CONF", "0.55"))
+    yolo_phone_min_area_ratio: float = float(os.getenv("YOLO_PHONE_MIN_AREA_RATIO", "0.01"))
+    yolo_phone_center_x_margin: float = float(os.getenv("YOLO_PHONE_CENTER_X_MARGIN", "0.15"))
+    yolo_phone_min_center_y_ratio: float = float(os.getenv("YOLO_PHONE_MIN_CENTER_Y_RATIO", "0.30"))
+    yolo_phone_on_frames: int = int(os.getenv("YOLO_PHONE_ON_FRAMES", "10"))
+    yolo_phone_off_frames: int = int(os.getenv("YOLO_PHONE_OFF_FRAMES", "6"))
+
+    # Voice alert (free local TTS by default, ElevenLabs optional)
+    voice_enabled: bool = os.getenv("VOICE_ENABLED", "1") == "1"
+    voice_backend: str = os.getenv("VOICE_BACKEND", "local").lower()  # local | elevenlabs
+    local_voice_name: str = os.getenv("LOCAL_VOICE_NAME", "Samantha")  # used by macOS `say`
+    elevenlabs_enabled: bool = os.getenv("ELEVENLABS_ENABLED", "0") == "1"
+    elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
+    elevenlabs_voice_id: str = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+    elevenlabs_model_id: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5")
+    elevenlabs_fallback_local: bool = os.getenv("ELEVENLABS_FALLBACK_LOCAL", "1") == "1"
+    voice_debug: bool = os.getenv("VOICE_DEBUG", "0") == "1"
+    distraction_trigger_seconds: float = float(os.getenv("DISTRACTION_TRIGGER_SECONDS", "5"))
+    distraction_voice_cooldown_seconds: float = float(os.getenv("DISTRACTION_VOICE_COOLDOWN_SECONDS", "20"))
+    off_task_reset_seconds: float = float(os.getenv("OFF_TASK_RESET_SECONDS", "1.5"))
+    blink_eye_openness_threshold: float = float(os.getenv("BLINK_EYE_OPENNESS_THRESHOLD", "0.11"))
+    gaze_off_grace_seconds: float = float(os.getenv("GAZE_OFF_GRACE_SECONDS", "0.8"))
+    voice_test_on_start: bool = os.getenv("VOICE_TEST_ON_START", "0") == "1"
 
 
 CONFIG = AppConfig()
