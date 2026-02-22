@@ -240,38 +240,6 @@ def run(show_window: bool, fullscreen: bool) -> None:
                     (0, 0, 255),
                     2,
                 )
-            if posture_res.enabled:
-                if not posture_res.calibrated:
-                    cv2.putText(
-                        vis.frame,
-                        f"Posture: calibrating {posture_res.calibration_progress}/{posture_res.calibration_target}",
-                        (20, 400),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 0),
-                        2,
-                    )
-                elif posture_res.posture_text:
-                    posture_color = (0, 255, 0) if posture_res.good_posture else (0, 0, 255)
-                    cv2.putText(
-                        vis.frame,
-                        f"Posture: {posture_res.posture_text}",
-                        (20, 400),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        posture_color,
-                        2,
-                    )
-                    if posture_res.head_deviation is not None and posture_res.drop_deviation is not None:
-                        cv2.putText(
-                            vis.frame,
-                            f"Posture Fwd/Drop: {posture_res.head_deviation:+.2f}/{posture_res.drop_deviation:+.2f}",
-                            (20, 430),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.65,
-                            (200, 200, 200),
-                            2,
-                        )
 
             if show_window:
                 cv2.imshow("Productivity Pi", vis.frame)

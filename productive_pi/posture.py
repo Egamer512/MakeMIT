@@ -12,10 +12,6 @@ class PostureResult:
     calibrated: bool
     good_posture: bool | None
     head_deviation: float | None
-    drop_deviation: float | None
-    posture_text: str
-    calibration_progress: int
-    calibration_target: int
 
 
 class PostureMonitor:
@@ -91,17 +87,17 @@ class PostureMonitor:
 
     def process(self, frame: np.ndarray) -> PostureResult:
         if not self.enabled or self._model is None:
-            return PostureResult(False, False, None, None, "", 0, self.calibration_frames)
+            return PostureResult(False, False, None, None)
 
         try:
             results = self._model(frame, verbose=False)
         except Exception as exc:
             if self.debug:
                 print(f"[Posture][Debug] infer error: {exc}")
-            return PostureResult(True, self._calibrated, None, None, None, "", self._calib_frames, self.calibration_frames)
+            return PostureResult(True, self._calibrated, None, None)
 
         if not results:
-            return PostureResult(True, self._calibrated, None, None, None, "", self._calib_frames, self.calibration_frames)
+            return PostureResult(True, self._calibrated, None, None)
 
         for r in results:
             if r.keypoints is None or len(r.keypoints.xy) == 0:
@@ -169,16 +165,7 @@ class PostureMonitor:
                         f"height={self._baseline_nose_height:.3f}"
                     )
 
-                return PostureResult(
-                    True,
-                    False,
-                    None,
-                    None,
-                    None,
-                    "Sit straight - Calibrating...",
-                    self._calib_frames,
-                    self.calibration_frames,
-                )
+                return PostureResult(True, False, None, None)
 
             forward_deviation = nose_forward - self._baseline_nose_forward
             drop_deviation = self._baseline_nose_height - nose_height
@@ -211,15 +198,6 @@ class PostureMonitor:
                 1,
             )
 
-            return PostureResult(
-                True,
-                True,
-                good_posture,
-                forward_deviation,
-                drop_deviation,
-                posture,
-                self._calib_frames,
-                self.calibration_frames,
-            )
+            return PostureResult(True, True, good_posture, forward_deviation)
 
-        return PostureResult(True, self._calibrated, None, None, None, "", self._calib_frames, self.calibration_frames)
+        return PostureResult(True, self._calibrated, None, None)
