@@ -14,6 +14,15 @@ from typing import Optional
 # Avoid Wayland plugin issues on Raspberry Pi OpenCV Qt builds.
 if os.name == "posix":
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    if "QT_QPA_FONTDIR" not in os.environ:
+        for _font_dir in (
+            "/usr/share/fonts/truetype/dejavu",
+            "/usr/share/fonts/truetype/freefont",
+            "/usr/share/fonts",
+        ):
+            if Path(_font_dir).exists():
+                os.environ["QT_QPA_FONTDIR"] = _font_dir
+                break
 
 import cv2
 import numpy as np
@@ -314,7 +323,11 @@ def run_monitor_loop(
     posture_ready_for_alerts = (not CONFIG.posture_enabled)
 
     if show_windows:
-        cv2.namedWindow("Pi Split View", cv2.WINDOW_NORMAL)
+        try:
+            cv2.namedWindow("Pi Split View", cv2.WINDOW_NORMAL)
+        except Exception as exc:
+            print(f"[Bridge] GUI disabled (OpenCV window init failed): {exc}")
+            show_windows = False
 
     if reuse_eye_calibration:
         loaded = _load_eye_calibration(eye_calib_file)
