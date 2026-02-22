@@ -389,6 +389,34 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
         )
 
         if show_windows:
+            h, w = vis.frame.shape[:2]
+            status_text = "ON TASK" if not off_task else "OFF TASK"
+            status_color = (0, 170, 0) if not off_task else (0, 0, 200)
+            cv2.rectangle(vis.frame, (0, 0), (w, 52), status_color, -1)
+            cv2.putText(
+                vis.frame,
+                status_text,
+                (16, 36),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2,
+            )
+
+            eye_dbg = (
+                f"EyeCal:{'Y' if eye_calibrated else 'N'} "
+                f"Dev(Y/P):{yaw_dev:.1f}/{pitch_dev:.1f} "
+                f"Away:{'Y' if eye_away else 'N'}"
+            )
+            cv2.putText(
+                vis.frame,
+                eye_dbg,
+                (20, 460),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),
+                2,
+            )
             cv2.imshow("Pi Vision (Laptop Cam Stream)", vis.frame)
             cv2.imshow("Pi Posture Camera", pframe)
             key = cv2.waitKey(1) & 0xFF
