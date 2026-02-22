@@ -286,7 +286,7 @@ def run_monitor_loop(
     # Guided eye calibration profile.
     eye_calibrated = False
     eye_profile: Optional[dict] = None
-    calib_targets = ["center", "left", "right", "up", "down", "away"]
+    calib_targets = ["center", "left", "right", "up", "down", "away_left", "away_right", "away_up", "away_down"]
     calib_target_index = 0
     calib_stage_started_at: Optional[float] = None
     calib_stage_seconds = 7.0
@@ -294,16 +294,22 @@ def run_monitor_loop(
     calib_samples: list[tuple[float, float]] = []
     collected_points: dict[str, tuple[float, float]] = {}
     away_evidence_count = 0
+    away_synth = {
+        "away_left": (-25.0, 0.0),
+        "away_right": (25.0, 0.0),
+        "away_up": (0.0, -12.0),
+        "away_down": (0.0, 12.0),
+    }
 
     slouch_since: Optional[float] = None
     posture_good_since: Optional[float] = None
     slouch_alert_sent = False
     next_voice_allowed_at = 0.0
     voice_min_gap_seconds = 2.0
+    posture_ready_for_alerts = (not CONFIG.posture_enabled)
 
     if show_windows:
-        cv2.namedWindow("Pi Vision (Laptop Cam Stream)", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Pi Posture Camera", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Pi Split View", cv2.WINDOW_NORMAL)
 
     if reuse_eye_calibration:
         loaded = _load_eye_calibration(eye_calib_file)
@@ -355,7 +361,7 @@ def run_monitor_loop(
                 and vis.eye_pitch_deg is not None
             ):
                 calib_samples.append((vis.eye_yaw_deg, vis.eye_pitch_deg))
-            if target_name == "away" and ((not vis.user_in_frame) or (not vis.gaze_centered)):
+            if target_name.startswith("away_") and ((not vis.user_in_frame) or (not vis.gaze_centered)):
                 away_evidence_count += 1
 
             if elapsed >= calib_stage_seconds:
@@ -365,7 +371,7 @@ def run_monitor_loop(
                     avg_pitch = float(np.mean([v[1] for v in calib_samples]))
                     collected_points[target_name] = (avg_yaw, avg_pitch)
                     captured = True
-                elif target_name == "away":
+                elif target_name.startswith("away_"):
                     if calib_samples:
                         avg_yaw = float(np.mean([v[0] for v in calib_samples]))
                         avg_pitch = float(np.mean([v[1] for v in calib_samples]))
@@ -375,7 +381,8 @@ def run_monitor_loop(
                         # If eyes are not trackable while looking away, accept away evidence
                         # and synthesize a point far from center for radius derivation.
                         cy, cp = collected_points["center"]
-                        collected_points[target_name] = (cy + 25.0, cp + 10.0)
+                        dyaw, dpitch = away_synth.get(target_name, (25.0, 10.0))
+                        collected_points[target_name] = (cy + dyaw, cp + dpitch)
                         captured = True
 
                 if captured:
@@ -397,7 +404,10 @@ def run_monitor_loop(
                 if calib_target_index >= len(calib_targets):
                     center = collected_points["center"]
                     on_points = [collected_points[t] for t in ["center", "left", "right", "up", "down"]]
-                    away = collected_points["away"]
+                    away_points = [
+                        collected_points[t]
+                        for t in ["away_left", "away_right", "away_up", "away_down"]
+                    ]
 
                     yaw_vals = [p[0] for p in on_points]
                     pitch_vals = [p[1] for p in on_points]
@@ -411,7 +421,10 @@ def run_monitor_loop(
                     on_radius = max(
                         np.hypot(p[0] - center[0], p[1] - center[1]) for p in on_points
                     ) + 1.5
-                    away_radius = max(4.0, np.hypot(away[0] - center[0], away[1] - center[1]) * 0.45)
+                    away_radius = max(
+                        4.0,
+                        min(np.hypot(p[0] - center[0], p[1] - center[1]) for p in away_points) * 0.45,
+                    )
 
                     eye_profile = {
                         "version": 2,
@@ -431,6 +444,80 @@ def run_monitor_loop(
                     if save_eye_calibration:
                         _save_eye_calibration(eye_calib_file, eye_profile)
                         print(f"[Bridge] Saved eye calibration to {eye_calib_file}")
+
+        # Posture starts only after eye calibration is complete.
+        posture_active = eye_calibrated
+
+        # Posture (pi external cam). Run before off-task alerts so we can suppress
+        # focus alerts during posture calibration.
+        if posture_cap.isOpened() and posture.enabled and posture_active:
+            ok_posture, pframe = posture_cap.read()
+            if ok_posture:
+                pres = posture.process(pframe)
+                posture_ready_for_alerts = bool(pres.calibrated)
+                slouch_for = 0.0
+                if pres.enabled and pres.calibrated and pres.good_posture is not None:
+                    if not pres.good_posture:
+                        posture_good_since = None
+                        if slouch_since is None:
+                            slouch_since = now
+                        slouch_for = now - slouch_since
+                        if slouch_for >= CONFIG.posture_slouch_alert_seconds and not slouch_alert_sent:
+                            # Avoid overlap with vision alert queue.
+                            if (now >= next_voice_allowed_at) and (state.command_count() == 0):
+                                enqueue_speak(state, CONFIG.posture_alert_message)
+                                print(f"[Bridge] Posture alert at {slouch_for:.1f}s")
+                                state.set_metrics(last_alert=f"posture:{slouch_for:.1f}s")
+                                slouch_alert_sent = True
+                                next_voice_allowed_at = now + voice_min_gap_seconds
+                    else:
+                        if posture_good_since is None:
+                            posture_good_since = now
+                        if (now - posture_good_since) >= CONFIG.posture_recover_reset_seconds:
+                            slouch_since = None
+                            slouch_alert_sent = False
+            else:
+                pres = None
+                slouch_for = 0.0
+                # Keep vision alerts blocked while posture pipeline is active but
+                # this frame failed to read; otherwise transient camera hiccups can
+                # incorrectly re-enable off-task speech during posture calibration.
+                posture_ready_for_alerts = False
+        else:
+            pres = None
+            slouch_for = 0.0
+            posture_ready_for_alerts = (not (posture.enabled and posture_cap.isOpened() and posture_active))
+            pframe = np.zeros((480, 640, 3), dtype=np.uint8)
+            if not posture_cap.isOpened():
+                cv2.putText(
+                    pframe,
+                    "Posture camera unavailable",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 255),
+                    2,
+                )
+            elif posture.enabled and (not posture_active):
+                cv2.putText(
+                    pframe,
+                    "Waiting for eye calibration...",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 255),
+                    2,
+                )
+            else:
+                cv2.putText(
+                    pframe,
+                    "Posture disabled",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 165, 255),
+                    2,
+                )
 
         # Off-task (eye stream)
         blink_now = vis.user_in_frame and (vis.eye_openness > 0.0) and (vis.eye_openness < CONFIG.blink_eye_openness_threshold)
@@ -475,8 +562,9 @@ def run_monitor_loop(
                 gaze_off_long = (now - gaze_off_since) >= CONFIG.gaze_off_grace_seconds
 
         off_task = (not vis.user_in_frame) or gaze_off_long
-        if not eye_calibrated:
-            # Never issue vision off-task alerts while eye calibration is in progress.
+        if (not eye_calibrated) or (not posture_ready_for_alerts):
+            # Never issue vision off-task alerts while eye calibration is in progress
+            # or posture calibration is still running.
             off_task = False
             distracted_since = None
             on_task_since = None
@@ -509,73 +597,6 @@ def run_monitor_loop(
                 next_alert_elapsed = CONFIG.first_alert_seconds
             distracted_for = 0.0
 
-        # Posture starts only after eye calibration is complete.
-        posture_active = eye_calibrated
-
-        # Posture (pi external cam)
-        if posture_cap.isOpened() and posture.enabled and posture_active:
-            ok_posture, pframe = posture_cap.read()
-            if ok_posture:
-                pres = posture.process(pframe)
-                slouch_for = 0.0
-                if pres.enabled and pres.calibrated and pres.good_posture is not None:
-                    if not pres.good_posture:
-                        posture_good_since = None
-                        if slouch_since is None:
-                            slouch_since = now
-                        slouch_for = now - slouch_since
-                        if slouch_for >= CONFIG.posture_slouch_alert_seconds and not slouch_alert_sent:
-                            # Avoid overlap with vision alert queue.
-                            if (now >= next_voice_allowed_at) and (state.command_count() == 0):
-                                enqueue_speak(state, CONFIG.posture_alert_message)
-                                print(f"[Bridge] Posture alert at {slouch_for:.1f}s")
-                                state.set_metrics(last_alert=f"posture:{slouch_for:.1f}s")
-                                slouch_alert_sent = True
-                                next_voice_allowed_at = now + voice_min_gap_seconds
-                    else:
-                        if posture_good_since is None:
-                            posture_good_since = now
-                        if (now - posture_good_since) >= CONFIG.posture_recover_reset_seconds:
-                            slouch_since = None
-                            slouch_alert_sent = False
-            else:
-                pres = None
-                slouch_for = 0.0
-        else:
-            pres = None
-            slouch_for = 0.0
-            pframe = np.zeros((480, 640, 3), dtype=np.uint8)
-            if not posture_cap.isOpened():
-                cv2.putText(
-                    pframe,
-                    "Posture camera unavailable",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 0, 255),
-                    2,
-                )
-            elif posture.enabled and (not posture_active):
-                cv2.putText(
-                    pframe,
-                    "Waiting for eye calibration...",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 255, 255),
-                    2,
-                )
-            else:
-                cv2.putText(
-                    pframe,
-                    "Posture disabled",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 165, 255),
-                    2,
-                )
-
         state.set_metrics(
             user_in_frame=bool(vis.user_in_frame),
             gaze_centered=bool(vis.gaze_centered),
@@ -583,6 +604,7 @@ def run_monitor_loop(
             off_task_seconds=float(distracted_for),
             posture_enabled=bool(posture.enabled and posture_cap.isOpened()),
             posture_active=bool(posture_active),
+            posture_ready_for_alerts=bool(posture_ready_for_alerts),
             posture_calibrated=(None if pres is None else bool(pres.calibrated)),
             posture_good=(None if pres is None else pres.good_posture),
             posture_slouch_seconds=float(slouch_for),
@@ -653,8 +675,14 @@ def run_monitor_loop(
                 (255, 255, 0),
                 2,
             )
-            cv2.imshow("Pi Vision (Laptop Cam Stream)", vis.frame)
-            cv2.imshow("Pi Posture Camera", pframe)
+            left = vis.frame
+            right = pframe
+            if left.shape[0] != right.shape[0]:
+                target_h = min(left.shape[0], right.shape[0])
+                left = cv2.resize(left, (int(left.shape[1] * target_h / left.shape[0]), target_h))
+                right = cv2.resize(right, (int(right.shape[1] * target_h / right.shape[0]), target_h))
+            split = np.hstack([left, right])
+            cv2.imshow("Pi Split View", split)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("r"):
                 posture.reset_calibration()
