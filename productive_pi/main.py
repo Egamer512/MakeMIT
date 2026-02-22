@@ -41,7 +41,8 @@ def run(show_window: bool, fullscreen: bool) -> None:
         enabled=CONFIG.posture_enabled,
         model_path=CONFIG.posture_model_path,
         calibration_frames=CONFIG.posture_calibration_frames,
-        deviation_threshold=CONFIG.posture_deviation_threshold,
+        forward_threshold=CONFIG.posture_forward_threshold,
+        drop_threshold=CONFIG.posture_drop_threshold,
         debug=CONFIG.posture_debug,
     )
 

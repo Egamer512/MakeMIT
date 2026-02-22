@@ -95,7 +95,8 @@ class AppConfig:
     posture_enabled: bool = os.getenv("POSTURE_ENABLED", "0") == "1"
     posture_model_path: str = os.getenv("POSTURE_MODEL_PATH", "yolo11n-pose.pt")
     posture_calibration_frames: int = int(os.getenv("POSTURE_CALIBRATION_FRAMES", "60"))
-    posture_deviation_threshold: float = float(os.getenv("POSTURE_DEVIATION_THRESHOLD", "0.18"))
+    posture_forward_threshold: float = float(os.getenv("POSTURE_FORWARD_THRESHOLD", "0.15"))
+    posture_drop_threshold: float = float(os.getenv("POSTURE_DROP_THRESHOLD", "0.12"))
     posture_slouch_alert_seconds: float = float(os.getenv("POSTURE_SLOUCH_ALERT_SECONDS", "10"))
     posture_alert_message: str = os.getenv("POSTURE_ALERT_MESSAGE", "Hey! let's fix that posture of yours.")
     posture_recover_reset_seconds: float = float(os.getenv("POSTURE_RECOVER_RESET_SECONDS", "1.5"))
