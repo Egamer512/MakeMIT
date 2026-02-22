@@ -28,13 +28,35 @@ def draw_banner(frame, user_in_frame: bool) -> None:
     cv2.putText(frame, text, (16, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
 
+def _parse_camera_source(raw: str, fallback_index: int):
+    src = (raw or "").strip()
+    if not src:
+        return fallback_index
+    if src.isdigit():
+        return int(src)
+    return src
+
+
 def run(show_window: bool, fullscreen: bool) -> None:
-    cap = cv2.VideoCapture(CONFIG.camera_index)
+    eye_source = _parse_camera_source(CONFIG.camera_source, CONFIG.camera_index)
+    cap = cv2.VideoCapture(eye_source)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CONFIG.frame_width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG.frame_height)
 
     if not cap.isOpened():
-        raise RuntimeError("Could not open camera. Check CAMERA_INDEX and camera wiring.")
+        raise RuntimeError("Could not open eye camera. Check CAMERA_SOURCE/CAMERA_INDEX and camera wiring.")
+
+    posture_cap = None
+    posture_source = _parse_camera_source(CONFIG.posture_camera_source, CONFIG.camera_index)
+    use_separate_posture_cam = bool(CONFIG.posture_enabled and CONFIG.posture_camera_source)
+    if use_separate_posture_cam:
+        posture_cap = cv2.VideoCapture(posture_source)
+        posture_cap.set(cv2.CAP_PROP_FRAME_WIDTH, CONFIG.frame_width)
+        posture_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG.frame_height)
+        if not posture_cap.isOpened():
+            print("[Posture] Could not open posture camera source; falling back to eye camera feed.")
+            posture_cap = None
+            use_separate_posture_cam = False
 
     vision = VisionEngine(min_face_conf=CONFIG.min_face_conf)
     posture = PostureMonitor(
@@ -108,6 +130,8 @@ def run(show_window: bool, fullscreen: bool) -> None:
         cv2.namedWindow("Productivity Pi", cv2.WINDOW_NORMAL)
         if fullscreen:
             cv2.setWindowProperty("Productivity Pi", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        if use_separate_posture_cam and CONFIG.posture_show_window:
+            cv2.namedWindow("Posture Camera", cv2.WINDOW_NORMAL)
 
     try:
         while True:
@@ -121,7 +145,15 @@ def run(show_window: bool, fullscreen: bool) -> None:
             last = now
 
             vis = vision.process(frame)
-            posture_res = posture.process(vis.frame)
+
+            posture_frame = vis.frame
+            if posture_cap is not None:
+                ok_posture, ext_frame = posture_cap.read()
+                if ok_posture:
+                    posture_frame = ext_frame
+                else:
+                    print("[Posture] External posture camera frame read failed; using eye camera frame.")
+            posture_res = posture.process(posture_frame)
 
             state.user_in_frame = vis.user_in_frame
             state.eye_openness = vis.eye_openness
@@ -276,6 +308,8 @@ def run(show_window: bool, fullscreen: bool) -> None:
 
             if show_window:
                 cv2.imshow("Productivity Pi", vis.frame)
+                if use_separate_posture_cam and CONFIG.posture_show_window:
+                    cv2.imshow("Posture Camera", posture_frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
@@ -287,6 +321,8 @@ def run(show_window: bool, fullscreen: bool) -> None:
 
     finally:
         cap.release()
+        if posture_cap is not None:
+            posture_cap.release()
         lcd.close()
         # LED support is currently disabled.
         # led.close()

@@ -1,0 +1,14 @@
+[Unit]
+Description=BMO OLED Desk Companion
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/bmo_face
+ExecStart=/usr/bin/python3 /home/pi/bmo_face/face.py --auto
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
