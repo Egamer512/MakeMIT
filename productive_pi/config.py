@@ -76,11 +76,11 @@ class AppConfig:
     repeat_alert_seconds: float = float(os.getenv("REPEAT_ALERT_SECONDS", "30"))
     first_alert_message: str = os.getenv(
         "FIRST_ALERT_MESSAGE",
-        "Hey Anfal, Please stay on task, remember that your pset is due soon!",
+        "They there! Please return to your workspace!",
     )
     repeat_alert_message: str = os.getenv(
         "REPEAT_ALERT_MESSAGE",
-        "ANFAL! GET BACK TO WORK NOW.",
+        "It's been too long, please return to work!",
     )
 
     # LED alert on breadboard (off-task indicator)
