@@ -324,7 +324,7 @@ def run_monitor_loop(
 
     if show_windows:
         try:
-            cv2.namedWindow("Pi Split View", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("Pi Vision View", cv2.WINDOW_NORMAL)
         except Exception as exc:
             print(f"[Bridge] GUI disabled (OpenCV window init failed): {exc}")
             show_windows = False
@@ -693,14 +693,7 @@ def run_monitor_loop(
                 (255, 255, 0),
                 2,
             )
-            left = vis.frame
-            right = pframe
-            if left.shape[0] != right.shape[0]:
-                target_h = min(left.shape[0], right.shape[0])
-                left = cv2.resize(left, (int(left.shape[1] * target_h / left.shape[0]), target_h))
-                right = cv2.resize(right, (int(right.shape[1] * target_h / right.shape[0]), target_h))
-            split = np.hstack([left, right])
-            cv2.imshow("Pi Split View", split)
+            cv2.imshow("Pi Vision View", vis.frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("r"):
                 posture.reset_calibration()
@@ -792,12 +785,6 @@ def main() -> None:
     parser.add_argument("--no-save-eye-calibration", action="store_true")
     args = parser.parse_args()
 
-    # OpenCV GUI on many Pi images (Qt/xcb) is fragile and can abort the process
-    # with plugin/font errors. Disable local preview windows by default; force-enable
-    # only with PRODUCTIVE_PI_FORCE_WINDOWS=1.
-    if args.show_windows and os.environ.get("PRODUCTIVE_PI_FORCE_WINDOWS", "0") != "1":
-        print("[Bridge] Local preview windows disabled by default (set PRODUCTIVE_PI_FORCE_WINDOWS=1 to force).")
-        args.show_windows = False
     if args.show_windows and (not os.environ.get("DISPLAY")) and (not os.environ.get("WAYLAND_DISPLAY")):
         print("[Bridge] No desktop display detected; disabling --show-windows.")
         args.show_windows = False
