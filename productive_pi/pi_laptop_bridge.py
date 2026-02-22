@@ -331,6 +331,7 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--posture-camera-index", type=int, default=0)
+    parser.add_argument("--https", action="store_true", help="Serve over HTTPS (recommended for browser camera access)")
     args = parser.parse_args()
 
     state = SharedState()
@@ -339,9 +340,13 @@ def main() -> None:
     t = threading.Thread(target=run_monitor_loop, args=(state, args.posture_camera_index), daemon=True)
     t.start()
 
+    scheme = "https" if args.https else "http"
     print("[Bridge] Open this URL on laptop and allow camera:")
-    print(f"[Bridge] http://<PI_IP>:{args.port}/")
-    app.run(host=args.host, port=args.port, threaded=True)
+    print(f"[Bridge] {scheme}://<PI_IP>:{args.port}/")
+    if args.https:
+        app.run(host=args.host, port=args.port, threaded=True, ssl_context="adhoc")
+    else:
+        app.run(host=args.host, port=args.port, threaded=True)
 
 
 if __name__ == "__main__":
