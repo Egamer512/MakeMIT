@@ -12,6 +12,8 @@ class VisionResult:
     gaze_centered: bool
     eye_yaw_deg: Optional[float]
     eye_pitch_deg: Optional[float]
+    head_yaw_deg: Optional[float]
+    head_pitch_deg: Optional[float]
     frame: np.ndarray
 
 
@@ -43,6 +45,25 @@ class VisionEngine:
         pitch_deg = self._clamp(-dy, -1.0, 1.0) * max_pitch
         return yaw_deg, pitch_deg
 
+    def _estimate_head_angles(
+        self, fx: int, fy: int, fw: int, fh: int, frame_w: int, frame_h: int
+    ) -> tuple[float, float]:
+        # Coarse head rotation proxy from face-box center and shape.
+        # Center shift approximates yaw; aspect/vertical shift approximates pitch.
+        face_cx = fx + fw * 0.5
+        face_cy = fy + fh * 0.5
+        nx = (face_cx / max(1.0, float(frame_w))) - 0.5
+        ny = (face_cy / max(1.0, float(frame_h))) - 0.5
+        aspect = float(fw) / max(1.0, float(fh))
+        # Typical frontal face box aspect is ~0.75; deviation is a weak pitch cue.
+        aspect_delta = aspect - 0.75
+
+        max_head_yaw = 25.0
+        max_head_pitch = 18.0
+        head_yaw_deg = self._clamp(nx / 0.28, -1.0, 1.0) * max_head_yaw
+        head_pitch_deg = self._clamp(((-ny) + (aspect_delta * 0.35)) / 0.22, -1.0, 1.0) * max_head_pitch
+        return head_yaw_deg, head_pitch_deg
+
     @staticmethod
     def _pupil_offset(eye_gray: np.ndarray) -> tuple[float, float]:
         if eye_gray.size == 0:
@@ -63,13 +84,15 @@ class VisionEngine:
 
         if len(faces) == 0:
             cv2.putText(frame, "No user detected", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            return VisionResult(False, 0.0, False, None, None, frame)
+            return VisionResult(False, 0.0, False, None, None, None, None, frame)
 
         # Choose largest face.
         fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
         cv2.rectangle(frame, (fx, fy), (fx + fw, fy + fh), (0, 255, 255), 2)
         roi_gray = gray[fy : fy + fh, fx : fx + fw]
         roi_color = frame[fy : fy + fh, fx : fx + fw]
+        frame_h, frame_w = frame.shape[:2]
+        head_yaw_deg, head_pitch_deg = self._estimate_head_angles(fx, fy, fw, fh, frame_w, frame_h)
 
         eyes = self.eye_cascade.detectMultiScale(
             roi_gray, scaleFactor=1.15, minNeighbors=6, minSize=(20, 20), maxSize=(fw // 2, fh // 2)
@@ -105,8 +128,17 @@ class VisionEngine:
         if pupil_offsets:
             mean_dx = float(np.mean([v[0] for v in pupil_offsets]))
             mean_dy = float(np.mean([v[1] for v in pupil_offsets]))
-            eye_yaw_deg, eye_pitch_deg = self._estimate_eye_angles(mean_dx, mean_dy)
-            gaze_centered = abs(mean_dx) < 0.35 and abs(mean_dy) < 0.40 and eye_openness > 0.12
+            pupil_yaw_deg, pupil_pitch_deg = self._estimate_eye_angles(mean_dx, mean_dy)
+            # Combine pupil movement with head rotation to reduce false off-task events.
+            eye_yaw_deg = (0.65 * pupil_yaw_deg) + (0.35 * head_yaw_deg)
+            eye_pitch_deg = (0.65 * pupil_pitch_deg) + (0.35 * head_pitch_deg)
+            gaze_centered = (
+                abs(eye_yaw_deg) < 12.0
+                and abs(eye_pitch_deg) < 10.0
+                and abs(head_yaw_deg) < 18.0
+                and abs(head_pitch_deg) < 14.0
+                and eye_openness > 0.12
+            )
         else:
             eye_yaw_deg, eye_pitch_deg = None, None
             gaze_centered = False
@@ -121,8 +153,19 @@ class VisionEngine:
         else:
             cv2.putText(frame, "EyeYaw: n/a", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, "EyePitch: n/a", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"HeadYaw: {head_yaw_deg:+.1f} deg", (20, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"HeadPitch: {head_pitch_deg:+.1f} deg", (20, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        return VisionResult(True, eye_openness, gaze_centered, eye_yaw_deg, eye_pitch_deg, frame)
+        return VisionResult(
+            True,
+            eye_openness,
+            gaze_centered,
+            eye_yaw_deg,
+            eye_pitch_deg,
+            head_yaw_deg,
+            head_pitch_deg,
+            frame,
+        )
 
 
 class PhoneDetector:
