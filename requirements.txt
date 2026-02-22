@@ -3,4 +3,3 @@ numpy
 requests
 RPLCD
 smbus2
-gpiozero
