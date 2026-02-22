@@ -1,0 +1,6 @@
+opencv-python
+numpy
+requests
+RPLCD
+smbus2
+ultralytics
