@@ -180,6 +180,10 @@ class SharedState:
         with self.lock:
             return dict(self.metrics)
 
+    def command_count(self) -> int:
+        with self.lock:
+            return len(self.commands)
+
 
 def generate_elevenlabs_audio(text: str) -> Optional[bytes]:
     if not CONFIG.elevenlabs_enabled or not CONFIG.elevenlabs_api_key:
@@ -284,15 +288,18 @@ def run_monitor_loop(
     eye_profile: Optional[dict] = None
     calib_targets = ["center", "left", "right", "up", "down", "away"]
     calib_target_index = 0
-    calib_stage_started_at = time.monotonic()
-    calib_stage_seconds = 10.0  # user requested ~10s to move eyes into position
+    calib_stage_started_at: Optional[float] = None
+    calib_stage_seconds = 7.0
     calib_capture_window_seconds = 2.0
     calib_samples: list[tuple[float, float]] = []
     collected_points: dict[str, tuple[float, float]] = {}
+    away_evidence_count = 0
 
     slouch_since: Optional[float] = None
     posture_good_since: Optional[float] = None
     slouch_alert_sent = False
+    next_voice_allowed_at = 0.0
+    voice_min_gap_seconds = 2.0
 
     if show_windows:
         cv2.namedWindow("Pi Vision (Laptop Cam Stream)", cv2.WINDOW_NORMAL)
@@ -335,8 +342,11 @@ def run_monitor_loop(
         vis = vision.process(eye_frame)
         # Guided timed calibration (automatic capture; no keypress needed).
         if (not eye_calibrated) and (calib_target_index < len(calib_targets)):
+            if calib_stage_started_at is None:
+                calib_stage_started_at = now
             elapsed = now - calib_stage_started_at
             capture_start = max(0.0, calib_stage_seconds - calib_capture_window_seconds)
+            target_name = calib_targets[calib_target_index]
 
             if (
                 elapsed >= capture_start
@@ -345,22 +355,42 @@ def run_monitor_loop(
                 and vis.eye_pitch_deg is not None
             ):
                 calib_samples.append((vis.eye_yaw_deg, vis.eye_pitch_deg))
+            if target_name == "away" and ((not vis.user_in_frame) or (not vis.gaze_centered)):
+                away_evidence_count += 1
 
             if elapsed >= calib_stage_seconds:
-                target_name = calib_targets[calib_target_index]
-                if calib_samples:
+                captured = False
+                if target_name != "away" and calib_samples:
                     avg_yaw = float(np.mean([v[0] for v in calib_samples]))
                     avg_pitch = float(np.mean([v[1] for v in calib_samples]))
                     collected_points[target_name] = (avg_yaw, avg_pitch)
+                    captured = True
+                elif target_name == "away":
+                    if calib_samples:
+                        avg_yaw = float(np.mean([v[0] for v in calib_samples]))
+                        avg_pitch = float(np.mean([v[1] for v in calib_samples]))
+                        collected_points[target_name] = (avg_yaw, avg_pitch)
+                        captured = True
+                    elif away_evidence_count >= 5 and ("center" in collected_points):
+                        # If eyes are not trackable while looking away, accept away evidence
+                        # and synthesize a point far from center for radius derivation.
+                        cy, cp = collected_points["center"]
+                        collected_points[target_name] = (cy + 25.0, cp + 10.0)
+                        captured = True
+
+                if captured:
                     print(
                         f"[Bridge] Captured {target_name}: "
-                        f"{avg_yaw:+.1f}/{avg_pitch:+.1f}"
+                        f"{collected_points[target_name][0]:+.1f}/{collected_points[target_name][1]:+.1f}"
                     )
                     state.push_command(Command("beep", {}))
                     calib_target_index += 1
                     calib_samples = []
+                    away_evidence_count = 0
                 else:
                     print(f"[Bridge] No valid samples for {target_name}; repeating target.")
+                    calib_samples = []
+                    away_evidence_count = 0
 
                 calib_stage_started_at = now
 
@@ -445,6 +475,13 @@ def run_monitor_loop(
                 gaze_off_long = (now - gaze_off_since) >= CONFIG.gaze_off_grace_seconds
 
         off_task = (not vis.user_in_frame) or gaze_off_long
+        if not eye_calibrated:
+            # Never issue vision off-task alerts while eye calibration is in progress.
+            off_task = False
+            distracted_since = None
+            on_task_since = None
+            first_alert_fired = False
+            next_alert_elapsed = CONFIG.first_alert_seconds
         if off_task:
             on_task_since = None
             if distracted_since is None:
@@ -455,11 +492,14 @@ def run_monitor_loop(
             distracted_for = now - distracted_since
             while distracted_for >= next_alert_elapsed:
                 msg = CONFIG.first_alert_message if not first_alert_fired else CONFIG.repeat_alert_message
-                enqueue_speak(state, msg)
-                print(f"[Bridge] Off-task alert at {next_alert_elapsed:.1f}s")
-                state.set_metrics(last_alert=f"off_task:{next_alert_elapsed:.1f}s")
-                first_alert_fired = True
-                next_alert_elapsed += CONFIG.repeat_alert_seconds
+                if (now >= next_voice_allowed_at) and (state.command_count() == 0):
+                    enqueue_speak(state, msg)
+                    print(f"[Bridge] Off-task alert at {next_alert_elapsed:.1f}s")
+                    state.set_metrics(last_alert=f"off_task:{next_alert_elapsed:.1f}s")
+                    first_alert_fired = True
+                    next_alert_elapsed += CONFIG.repeat_alert_seconds
+                    next_voice_allowed_at = now + voice_min_gap_seconds
+                break
         else:
             if on_task_since is None:
                 on_task_since = now
@@ -485,10 +525,13 @@ def run_monitor_loop(
                             slouch_since = now
                         slouch_for = now - slouch_since
                         if slouch_for >= CONFIG.posture_slouch_alert_seconds and not slouch_alert_sent:
-                            enqueue_speak(state, CONFIG.posture_alert_message)
-                            print(f"[Bridge] Posture alert at {slouch_for:.1f}s")
-                            state.set_metrics(last_alert=f"posture:{slouch_for:.1f}s")
-                            slouch_alert_sent = True
+                            # Avoid overlap with vision alert queue.
+                            if (now >= next_voice_allowed_at) and (state.command_count() == 0):
+                                enqueue_speak(state, CONFIG.posture_alert_message)
+                                print(f"[Bridge] Posture alert at {slouch_for:.1f}s")
+                                state.set_metrics(last_alert=f"posture:{slouch_for:.1f}s")
+                                slouch_alert_sent = True
+                                next_voice_allowed_at = now + voice_min_gap_seconds
                     else:
                         if posture_good_since is None:
                             posture_good_since = now
@@ -554,7 +597,7 @@ def run_monitor_loop(
             if not eye_calibrated:
                 if calib_target_index < len(calib_targets):
                     target = calib_targets[calib_target_index].upper()
-                    remaining = max(0.0, calib_stage_seconds - (now - calib_stage_started_at))
+                    remaining = max(0.0, calib_stage_seconds - (now - (calib_stage_started_at or now)))
                     calib_line = (
                         f"CALIBRATE: LOOK {target} "
                         f"({calib_target_index+1}/{len(calib_targets)}) "
@@ -624,7 +667,8 @@ def run_monitor_loop(
                 calib_target_index = 0
                 calib_samples = []
                 collected_points = {}
-                calib_stage_started_at = now
+                away_evidence_count = 0
+                calib_stage_started_at = None
                 print("[Bridge] Eye calibration reset. Timed guided calibration restarted.")
 
         time.sleep(0.03)
