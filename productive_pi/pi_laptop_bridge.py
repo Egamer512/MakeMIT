@@ -211,7 +211,7 @@ def enqueue_speak(state: SharedState, text: str) -> None:
         state.push_command(Command("speak_text", {"text": text}))
 
 
-def run_monitor_loop(state: SharedState, posture_camera_index: int) -> None:
+def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows: bool) -> None:
     vision = VisionEngine(min_face_conf=CONFIG.min_face_conf)
     posture = PostureMonitor(
         enabled=CONFIG.posture_enabled,
@@ -235,6 +235,10 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int) -> None:
     slouch_since: Optional[float] = None
     posture_good_since: Optional[float] = None
     slouch_alert_sent = False
+
+    if show_windows:
+        cv2.namedWindow("Pi Vision (Laptop Cam Stream)", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Pi Posture Camera", cv2.WINDOW_NORMAL)
 
     while True:
         now = time.monotonic()
@@ -310,6 +314,16 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int) -> None:
         else:
             pres = None
             slouch_for = 0.0
+            pframe = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(
+                pframe,
+                "Posture camera unavailable",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                2,
+            )
 
         state.set_metrics(
             user_in_frame=bool(vis.user_in_frame),
@@ -321,6 +335,16 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int) -> None:
             posture_good=(None if pres is None else pres.good_posture),
             posture_slouch_seconds=float(slouch_for),
         )
+
+        if show_windows:
+            cv2.imshow("Pi Vision (Laptop Cam Stream)", vis.frame)
+            cv2.imshow("Pi Posture Camera", pframe)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("r"):
+                posture.reset_calibration()
+                slouch_since = None
+                posture_good_since = None
+                slouch_alert_sent = False
 
         time.sleep(0.03)
 
@@ -391,12 +415,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--posture-camera-index", type=int, default=0)
     parser.add_argument("--https", action="store_true", help="Serve over HTTPS (recommended for browser camera access)")
+    parser.add_argument("--show-windows", action="store_true", help="Show eye+posture previews on Pi display")
     args = parser.parse_args()
 
     state = SharedState()
     app = create_app(state)
 
-    t = threading.Thread(target=run_monitor_loop, args=(state, args.posture_camera_index), daemon=True)
+    t = threading.Thread(target=run_monitor_loop, args=(state, args.posture_camera_index, args.show_windows), daemon=True)
     t.start()
 
     scheme = "https" if args.https else "http"
