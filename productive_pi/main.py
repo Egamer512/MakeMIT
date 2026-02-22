@@ -7,6 +7,8 @@ import cv2
 from .config import CONFIG
 from .coach import CoachConfig, ProductivityCoach
 from .lcd import LcdDisplay
+from .posture import PostureMonitor
+from .ready_listener import ReadyPhraseListener
 from .speech import VoiceAlerter, VoiceConfig
 from .state import ProductivityState
 from .vision import VisionEngine
@@ -35,6 +37,13 @@ def run(show_window: bool, fullscreen: bool) -> None:
         raise RuntimeError("Could not open camera. Check CAMERA_INDEX and camera wiring.")
 
     vision = VisionEngine(min_face_conf=CONFIG.min_face_conf)
+    posture = PostureMonitor(
+        enabled=CONFIG.posture_enabled,
+        model_path=CONFIG.posture_model_path,
+        calibration_frames=CONFIG.posture_calibration_frames,
+        deviation_threshold=CONFIG.posture_deviation_threshold,
+        debug=CONFIG.posture_debug,
+    )
 
     coach = ProductivityCoach(
         CoachConfig(
@@ -73,6 +82,15 @@ def run(show_window: bool, fullscreen: bool) -> None:
     )
     if CONFIG.voice_test_on_start:
         voice.maybe_speak("Voice system ready.", force=True)
+    ready_listener = ReadyPhraseListener(
+        enabled=CONFIG.ready_phrase_enabled,
+        phrase=CONFIG.ready_phrase_text,
+        model_name=CONFIG.ready_whisper_model,
+        chunk_seconds=CONFIG.ready_chunk_seconds,
+        timeout_seconds=CONFIG.ready_timeout_seconds,
+        debug=CONFIG.ready_debug,
+    )
+    ready_listener.wait_for_phrase()
 
     state = ProductivityState()
     last = time.monotonic()
@@ -81,6 +99,9 @@ def run(show_window: bool, fullscreen: bool) -> None:
     gaze_off_since: Optional[float] = None
     next_alert_elapsed = CONFIG.first_alert_seconds
     first_alert_fired = False
+    slouch_since: Optional[float] = None
+    posture_good_since: Optional[float] = None
+    slouch_alert_sent = False
 
     if show_window:
         cv2.namedWindow("Productivity Pi", cv2.WINDOW_NORMAL)
@@ -99,6 +120,7 @@ def run(show_window: bool, fullscreen: bool) -> None:
             last = now
 
             vis = vision.process(frame)
+            posture_res = posture.process(vis.frame)
 
             state.user_in_frame = vis.user_in_frame
             state.eye_openness = vis.eye_openness
@@ -154,6 +176,26 @@ def run(show_window: bool, fullscreen: bool) -> None:
                     first_alert_fired = False
                 distracted_for = 0.0
 
+            if posture_res.enabled and posture_res.calibrated and posture_res.good_posture is not None:
+                if not posture_res.good_posture:
+                    posture_good_since = None
+                    if slouch_since is None:
+                        slouch_since = now
+                    slouch_for = now - slouch_since
+                    if slouch_for >= CONFIG.posture_slouch_alert_seconds and not slouch_alert_sent:
+                        voice.maybe_speak(CONFIG.posture_alert_message, force=True)
+                        print(f"[Voice] Triggered posture alert at {slouch_for:.1f}s slouch.")
+                        slouch_alert_sent = True
+                else:
+                    if posture_good_since is None:
+                        posture_good_since = now
+                    if (now - posture_good_since) >= CONFIG.posture_recover_reset_seconds:
+                        slouch_since = None
+                        slouch_alert_sent = False
+                    slouch_for = 0.0
+            else:
+                slouch_for = 0.0
+
             # LED support is currently disabled.
             # led.set_off_task(off_task)
 
@@ -187,12 +229,27 @@ def run(show_window: bool, fullscreen: bool) -> None:
                     (0, 120, 255),
                     2,
                 )
+            if posture_res.enabled and posture_res.calibrated and posture_res.good_posture is False:
+                cv2.putText(
+                    vis.frame,
+                    f"Slouch: {slouch_for:0.1f}s",
+                    (20, 370),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 255),
+                    2,
+                )
 
             if show_window:
                 cv2.imshow("Productivity Pi", vis.frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
+                if key == ord("r"):
+                    posture.reset_calibration()
+                    slouch_since = None
+                    posture_good_since = None
+                    slouch_alert_sent = False
 
     finally:
         cap.release()

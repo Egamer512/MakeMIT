@@ -3,3 +3,6 @@ numpy
 requests
 RPLCD
 smbus2
+faster-whisper
+sounddevice
+ultralytics

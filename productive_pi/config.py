@@ -83,6 +83,24 @@ class AppConfig:
         "It's been too long, please return to work!",
     )
 
+    # Voice input gate: wait for phrase before monitoring starts.
+    ready_phrase_enabled: bool = os.getenv("READY_PHRASE_ENABLED", "0") == "1"
+    ready_phrase_text: str = os.getenv("READY_PHRASE_TEXT", "I'm ready")
+    ready_whisper_model: str = os.getenv("READY_WHISPER_MODEL", "tiny.en")
+    ready_chunk_seconds: float = float(os.getenv("READY_CHUNK_SECONDS", "2.0"))
+    ready_timeout_seconds: float = float(os.getenv("READY_TIMEOUT_SECONDS", "0"))
+    ready_debug: bool = os.getenv("READY_DEBUG", "0") == "1"
+
+    # Posture detection (YOLO pose)
+    posture_enabled: bool = os.getenv("POSTURE_ENABLED", "0") == "1"
+    posture_model_path: str = os.getenv("POSTURE_MODEL_PATH", "yolo11n-pose.pt")
+    posture_calibration_frames: int = int(os.getenv("POSTURE_CALIBRATION_FRAMES", "60"))
+    posture_deviation_threshold: float = float(os.getenv("POSTURE_DEVIATION_THRESHOLD", "0.18"))
+    posture_slouch_alert_seconds: float = float(os.getenv("POSTURE_SLOUCH_ALERT_SECONDS", "10"))
+    posture_alert_message: str = os.getenv("POSTURE_ALERT_MESSAGE", "Hey! let's fix that posture of yours.")
+    posture_recover_reset_seconds: float = float(os.getenv("POSTURE_RECOVER_RESET_SECONDS", "1.5"))
+    posture_debug: bool = os.getenv("POSTURE_DEBUG", "0") == "1"
+
     # LED alert on breadboard (off-task indicator)
     led_enabled: bool = os.getenv("LED_ENABLED", "0") == "1"
     led_pin: int = int(os.getenv("LED_PIN", "17"))  # BCM numbering by default
