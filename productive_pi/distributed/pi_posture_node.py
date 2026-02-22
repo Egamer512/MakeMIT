@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import socket
 import time
 
@@ -27,6 +28,10 @@ def main() -> None:
     parser.add_argument("--alert-message", default="Hey! let's fix that posture of yours.")
     parser.add_argument("--show-window", action="store_true")
     args = parser.parse_args()
+    window_enabled = bool(args.show_window)
+    if window_enabled and (not os.environ.get("DISPLAY")) and (not os.environ.get("WAYLAND_DISPLAY")):
+        print("[PiPosture] No display session detected; running without preview window.")
+        window_enabled = False
 
     cap = cv2.VideoCapture(args.camera_index)
     if not cap.isOpened():
@@ -99,9 +104,15 @@ def main() -> None:
                 )
                 last_status_sent = now
 
-            if args.show_window:
-                cv2.imshow("Pi Posture", frame)
-                key = cv2.waitKey(1) & 0xFF
+            if window_enabled:
+                try:
+                    cv2.imshow("Pi Posture", frame)
+                    key = cv2.waitKey(1) & 0xFF
+                except Exception as exc:
+                    print(f"[PiPosture] Preview window disabled due to OpenCV GUI error: {exc}")
+                    window_enabled = False
+                    key = 255
+
                 if key == ord("q"):
                     break
                 if key == ord("r"):
@@ -112,7 +123,8 @@ def main() -> None:
 
     finally:
         cap.release()
-        cv2.destroyAllWindows()
+        if window_enabled:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

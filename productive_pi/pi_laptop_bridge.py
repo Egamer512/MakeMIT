@@ -325,6 +325,7 @@ def run_monitor_loop(
     if show_windows:
         try:
             cv2.namedWindow("Pi Vision View", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("Pi Posture View", cv2.WINDOW_NORMAL)
         except Exception as exc:
             print(f"[Bridge] GUI disabled (OpenCV window init failed): {exc}")
             show_windows = False
@@ -694,6 +695,7 @@ def run_monitor_loop(
                 2,
             )
             cv2.imshow("Pi Vision View", vis.frame)
+            cv2.imshow("Pi Posture View", pframe)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("r"):
                 posture.reset_calibration()
