@@ -792,6 +792,12 @@ def main() -> None:
     parser.add_argument("--no-save-eye-calibration", action="store_true")
     args = parser.parse_args()
 
+    # OpenCV GUI on many Pi images (Qt/xcb) is fragile and can abort the process
+    # with plugin/font errors. Disable local preview windows by default; force-enable
+    # only with PRODUCTIVE_PI_FORCE_WINDOWS=1.
+    if args.show_windows and os.environ.get("PRODUCTIVE_PI_FORCE_WINDOWS", "0") != "1":
+        print("[Bridge] Local preview windows disabled by default (set PRODUCTIVE_PI_FORCE_WINDOWS=1 to force).")
+        args.show_windows = False
     if args.show_windows and (not os.environ.get("DISPLAY")) and (not os.environ.get("WAYLAND_DISPLAY")):
         print("[Bridge] No desktop display detected; disabling --show-windows.")
         args.show_windows = False
