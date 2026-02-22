@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -211,7 +212,41 @@ def enqueue_speak(state: SharedState, text: str) -> None:
         state.push_command(Command("speak_text", {"text": text}))
 
 
-def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows: bool) -> None:
+def _load_eye_calibration(path: Path) -> Optional[dict]:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") == 2 and "derived" in data:
+            return data
+        # Backward compatibility with older single-baseline calibration.
+        yaw = float(data.get("baseline_yaw"))
+        pitch = float(data.get("baseline_pitch"))
+        return {
+            "version": 1,
+            "baseline_yaw": yaw,
+            "baseline_pitch": pitch,
+        }
+    except Exception:
+        return None
+
+
+def _save_eye_calibration(path: Path, payload: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[Bridge] Could not save eye calibration: {exc}")
+
+
+def run_monitor_loop(
+    state: SharedState,
+    posture_camera_index: int,
+    show_windows: bool,
+    eye_calib_file: Path,
+    reuse_eye_calibration: bool,
+    save_eye_calibration: bool,
+) -> None:
     vision = VisionEngine(min_face_conf=CONFIG.min_face_conf)
     posture = PostureMonitor(
         enabled=CONFIG.posture_enabled,
@@ -233,16 +268,15 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
     next_alert_elapsed = CONFIG.first_alert_seconds
     first_alert_fired = False
 
-    # Eye-angle calibration (neutral gaze baseline).
+    # Guided eye calibration profile.
     eye_calibrated = False
-    eye_calib_target = 40
-    eye_calib_count = 0
-    eye_base_yaw_sum = 0.0
-    eye_base_pitch_sum = 0.0
-    eye_base_yaw = 0.0
-    eye_base_pitch = 0.0
-    eye_yaw_dev_threshold = 10.0
-    eye_pitch_dev_threshold = 8.0
+    eye_profile: Optional[dict] = None
+    calib_targets = ["center", "left", "right", "up", "down", "away"]
+    calib_target_index = 0
+    calib_collecting = False
+    calib_samples: list[tuple[float, float]] = []
+    calib_capture_count = 18
+    collected_points: dict[str, tuple[float, float]] = {}
 
     slouch_since: Optional[float] = None
     posture_good_since: Optional[float] = None
@@ -251,6 +285,32 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
     if show_windows:
         cv2.namedWindow("Pi Vision (Laptop Cam Stream)", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Pi Posture Camera", cv2.WINDOW_NORMAL)
+
+    if reuse_eye_calibration:
+        loaded = _load_eye_calibration(eye_calib_file)
+        if loaded is not None:
+            if loaded.get("version") == 2:
+                eye_profile = loaded
+                eye_calibrated = True
+                calib_target_index = len(calib_targets)
+                print(f"[Bridge] Loaded guided eye calibration from {eye_calib_file}")
+            elif loaded.get("version") == 1:
+                # Legacy baseline fallback.
+                yaw = float(loaded["baseline_yaw"])
+                pitch = float(loaded["baseline_pitch"])
+                eye_profile = {
+                    "version": 1,
+                    "baseline_yaw": yaw,
+                    "baseline_pitch": pitch,
+                    "yaw_threshold": 10.0,
+                    "pitch_threshold": 8.0,
+                }
+                eye_calibrated = True
+                calib_target_index = len(calib_targets)
+                print(
+                    f"[Bridge] Loaded legacy eye calibration from {eye_calib_file}: "
+                    f"yaw/pitch={yaw:+.1f}/{pitch:+.1f}"
+                )
 
     while True:
         now = time.monotonic()
@@ -261,25 +321,64 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
             continue
 
         vis = vision.process(eye_frame)
-
-        # Calibrate neutral gaze while user is in frame and angles are available.
+        # Guided calibration collection after pressing 'n'.
         if (
-            (not eye_calibrated)
+            calib_collecting
             and vis.user_in_frame
             and vis.eye_yaw_deg is not None
             and vis.eye_pitch_deg is not None
         ):
-            eye_calib_count += 1
-            eye_base_yaw_sum += vis.eye_yaw_deg
-            eye_base_pitch_sum += vis.eye_pitch_deg
-            if eye_calib_count >= eye_calib_target:
-                eye_base_yaw = eye_base_yaw_sum / float(eye_calib_count)
-                eye_base_pitch = eye_base_pitch_sum / float(eye_calib_count)
-                eye_calibrated = True
+            calib_samples.append((vis.eye_yaw_deg, vis.eye_pitch_deg))
+            if len(calib_samples) >= calib_capture_count:
+                avg_yaw = float(np.mean([v[0] for v in calib_samples]))
+                avg_pitch = float(np.mean([v[1] for v in calib_samples]))
+                target_name = calib_targets[calib_target_index]
+                collected_points[target_name] = (avg_yaw, avg_pitch)
                 print(
-                    f"[Bridge] Eye calibrated. baseline yaw/pitch="
-                    f"{eye_base_yaw:+.1f}/{eye_base_pitch:+.1f}"
+                    f"[Bridge] Captured {target_name}: "
+                    f"{avg_yaw:+.1f}/{avg_pitch:+.1f}"
                 )
+                calib_samples = []
+                calib_collecting = False
+                calib_target_index += 1
+
+                if calib_target_index >= len(calib_targets):
+                    center = collected_points["center"]
+                    on_points = [collected_points[t] for t in ["center", "left", "right", "up", "down"]]
+                    away = collected_points["away"]
+
+                    yaw_vals = [p[0] for p in on_points]
+                    pitch_vals = [p[1] for p in on_points]
+                    yaw_margin = 2.5
+                    pitch_margin = 2.5
+                    yaw_min = min(yaw_vals) - yaw_margin
+                    yaw_max = max(yaw_vals) + yaw_margin
+                    pitch_min = min(pitch_vals) - pitch_margin
+                    pitch_max = max(pitch_vals) + pitch_margin
+
+                    on_radius = max(
+                        np.hypot(p[0] - center[0], p[1] - center[1]) for p in on_points
+                    ) + 1.5
+                    away_radius = max(4.0, np.hypot(away[0] - center[0], away[1] - center[1]) * 0.45)
+
+                    eye_profile = {
+                        "version": 2,
+                        "points": {k: [v[0], v[1]] for k, v in collected_points.items()},
+                        "derived": {
+                            "center": [center[0], center[1]],
+                            "yaw_min": yaw_min,
+                            "yaw_max": yaw_max,
+                            "pitch_min": pitch_min,
+                            "pitch_max": pitch_max,
+                            "on_radius": on_radius,
+                            "away_radius": away_radius,
+                        },
+                    }
+                    eye_calibrated = True
+                    print("[Bridge] Guided eye calibration complete.")
+                    if save_eye_calibration:
+                        _save_eye_calibration(eye_calib_file, eye_profile)
+                        print(f"[Bridge] Saved eye calibration to {eye_calib_file}")
 
         # Off-task (eye stream)
         blink_now = vis.user_in_frame and (vis.eye_openness > 0.0) and (vis.eye_openness < CONFIG.blink_eye_openness_threshold)
@@ -287,10 +386,26 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
         pitch_dev = 0.0
         eye_away = False
         if vis.eye_yaw_deg is not None and vis.eye_pitch_deg is not None:
-            if eye_calibrated:
-                yaw_dev = abs(vis.eye_yaw_deg - eye_base_yaw)
-                pitch_dev = abs(vis.eye_pitch_deg - eye_base_pitch)
-                eye_away = (yaw_dev > eye_yaw_dev_threshold) or (pitch_dev > eye_pitch_dev_threshold)
+            if eye_calibrated and eye_profile is not None:
+                if eye_profile.get("version") == 2:
+                    d = eye_profile["derived"]
+                    center = d["center"]
+                    dist_center = float(np.hypot(vis.eye_yaw_deg - center[0], vis.eye_pitch_deg - center[1]))
+                    yaw_dev = abs(vis.eye_yaw_deg - center[0])
+                    pitch_dev = abs(vis.eye_pitch_deg - center[1])
+                    within_box = (
+                        d["yaw_min"] <= vis.eye_yaw_deg <= d["yaw_max"]
+                        and d["pitch_min"] <= vis.eye_pitch_deg <= d["pitch_max"]
+                    )
+                    eye_away = (not within_box) or (dist_center > d["on_radius"])
+                else:
+                    base_yaw = float(eye_profile["baseline_yaw"])
+                    base_pitch = float(eye_profile["baseline_pitch"])
+                    yaw_thr = float(eye_profile.get("yaw_threshold", 10.0))
+                    pitch_thr = float(eye_profile.get("pitch_threshold", 8.0))
+                    yaw_dev = abs(vis.eye_yaw_deg - base_yaw)
+                    pitch_dev = abs(vis.eye_pitch_deg - base_pitch)
+                    eye_away = (yaw_dev > yaw_thr) or (pitch_dev > pitch_thr)
             else:
                 # Pre-calibration fallback.
                 eye_away = not vis.gaze_centered
@@ -382,13 +497,39 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
             posture_good=(None if pres is None else pres.good_posture),
             posture_slouch_seconds=float(slouch_for),
             eye_calibrated=bool(eye_calibrated),
-            eye_calibration_progress=int(eye_calib_count),
-            eye_calibration_target=int(eye_calib_target),
+            eye_calibration_progress=int(calib_target_index),
+            eye_calibration_target=int(len(calib_targets)),
             eye_yaw_deviation=float(yaw_dev),
             eye_pitch_deviation=float(pitch_dev),
         )
 
         if show_windows:
+            if not eye_calibrated:
+                if calib_target_index < len(calib_targets):
+                    target = calib_targets[calib_target_index].upper()
+                    calib_line = f"CALIBRATE: LOOK {target}, press N to capture ({calib_target_index+1}/{len(calib_targets)})"
+                else:
+                    calib_line = "CALIBRATION: processing..."
+                cv2.putText(
+                    vis.frame,
+                    calib_line,
+                    (20, 430),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 0),
+                    2,
+                )
+                if calib_collecting:
+                    cv2.putText(
+                        vis.frame,
+                        f"Capturing... {len(calib_samples)}/{calib_capture_count}",
+                        (20, 455),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 0),
+                        2,
+                    )
+
             h, w = vis.frame.shape[:2]
             status_text = "ON TASK" if not off_task else "OFF TASK"
             status_color = (0, 170, 0) if not off_task else (0, 0, 200)
@@ -425,6 +566,18 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
                 slouch_since = None
                 posture_good_since = None
                 slouch_alert_sent = False
+            if key == ord("c"):
+                eye_calibrated = False
+                eye_profile = None
+                calib_target_index = 0
+                calib_collecting = False
+                calib_samples = []
+                collected_points = {}
+                print("[Bridge] Eye calibration reset. Use guided calibration with N.")
+            if key == ord("n"):
+                if not eye_calibrated and (vis.eye_yaw_deg is not None) and (vis.eye_pitch_deg is not None):
+                    calib_collecting = True
+                    calib_samples = []
 
         time.sleep(0.03)
 
@@ -496,12 +649,26 @@ def main() -> None:
     parser.add_argument("--posture-camera-index", type=int, default=0)
     parser.add_argument("--https", action="store_true", help="Serve over HTTPS (recommended for browser camera access)")
     parser.add_argument("--show-windows", action="store_true", help="Show eye+posture previews on Pi display")
+    parser.add_argument("--eye-calib-file", default=str(Path.home() / ".productive_pi" / "eye_calibration.json"))
+    parser.add_argument("--no-reuse-eye-calibration", action="store_true")
+    parser.add_argument("--no-save-eye-calibration", action="store_true")
     args = parser.parse_args()
 
     state = SharedState()
     app = create_app(state)
 
-    t = threading.Thread(target=run_monitor_loop, args=(state, args.posture_camera_index, args.show_windows), daemon=True)
+    t = threading.Thread(
+        target=run_monitor_loop,
+        args=(
+            state,
+            args.posture_camera_index,
+            args.show_windows,
+            Path(args.eye_calib_file),
+            not args.no_reuse_eye_calibration,
+            not args.no_save_eye_calibration,
+        ),
+        daemon=True,
+    )
     t.start()
 
     scheme = "https" if args.https else "http"
