@@ -233,6 +233,17 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
     next_alert_elapsed = CONFIG.first_alert_seconds
     first_alert_fired = False
 
+    # Eye-angle calibration (neutral gaze baseline).
+    eye_calibrated = False
+    eye_calib_target = 40
+    eye_calib_count = 0
+    eye_base_yaw_sum = 0.0
+    eye_base_pitch_sum = 0.0
+    eye_base_yaw = 0.0
+    eye_base_pitch = 0.0
+    eye_yaw_dev_threshold = 10.0
+    eye_pitch_dev_threshold = 8.0
+
     slouch_since: Optional[float] = None
     posture_good_since: Optional[float] = None
     slouch_alert_sent = False
@@ -251,13 +262,44 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
 
         vis = vision.process(eye_frame)
 
+        # Calibrate neutral gaze while user is in frame and angles are available.
+        if (
+            (not eye_calibrated)
+            and vis.user_in_frame
+            and vis.eye_yaw_deg is not None
+            and vis.eye_pitch_deg is not None
+        ):
+            eye_calib_count += 1
+            eye_base_yaw_sum += vis.eye_yaw_deg
+            eye_base_pitch_sum += vis.eye_pitch_deg
+            if eye_calib_count >= eye_calib_target:
+                eye_base_yaw = eye_base_yaw_sum / float(eye_calib_count)
+                eye_base_pitch = eye_base_pitch_sum / float(eye_calib_count)
+                eye_calibrated = True
+                print(
+                    f"[Bridge] Eye calibrated. baseline yaw/pitch="
+                    f"{eye_base_yaw:+.1f}/{eye_base_pitch:+.1f}"
+                )
+
         # Off-task (eye stream)
         blink_now = vis.user_in_frame and (vis.eye_openness > 0.0) and (vis.eye_openness < CONFIG.blink_eye_openness_threshold)
+        yaw_dev = 0.0
+        pitch_dev = 0.0
+        eye_away = False
+        if vis.eye_yaw_deg is not None and vis.eye_pitch_deg is not None:
+            if eye_calibrated:
+                yaw_dev = abs(vis.eye_yaw_deg - eye_base_yaw)
+                pitch_dev = abs(vis.eye_pitch_deg - eye_base_pitch)
+                eye_away = (yaw_dev > eye_yaw_dev_threshold) or (pitch_dev > eye_pitch_dev_threshold)
+            else:
+                # Pre-calibration fallback.
+                eye_away = not vis.gaze_centered
+
         if not vis.user_in_frame:
             gaze_off_since = None
             gaze_off_long = False
         else:
-            if vis.gaze_centered or blink_now:
+            if (not eye_away) or blink_now:
                 gaze_off_since = None
                 gaze_off_long = False
             else:
@@ -339,6 +381,11 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
             posture_calibrated=(None if pres is None else bool(pres.calibrated)),
             posture_good=(None if pres is None else pres.good_posture),
             posture_slouch_seconds=float(slouch_for),
+            eye_calibrated=bool(eye_calibrated),
+            eye_calibration_progress=int(eye_calib_count),
+            eye_calibration_target=int(eye_calib_target),
+            eye_yaw_deviation=float(yaw_dev),
+            eye_pitch_deviation=float(pitch_dev),
         )
 
         if show_windows:
