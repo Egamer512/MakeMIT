@@ -82,6 +82,17 @@ HTML_PAGE = """
             if (cmd.type === 'play_audio' && cmd.id) {
               const a = new Audio(`/api/audio/${cmd.id}.mp3`);
               await a.play();
+            } else if (cmd.type === 'beep') {
+              const ac = new (window.AudioContext || window.webkitAudioContext)();
+              const osc = ac.createOscillator();
+              const gain = ac.createGain();
+              osc.type = 'sine';
+              osc.frequency.value = 880;
+              gain.gain.value = 0.08;
+              osc.connect(gain);
+              gain.connect(ac.destination);
+              osc.start();
+              osc.stop(ac.currentTime + 0.12);
             } else if (cmd.type === 'speak_text' && cmd.text) {
               const u = new SpeechSynthesisUtterance(cmd.text);
               speechSynthesis.speak(u);
@@ -273,9 +284,10 @@ def run_monitor_loop(
     eye_profile: Optional[dict] = None
     calib_targets = ["center", "left", "right", "up", "down", "away"]
     calib_target_index = 0
-    calib_collecting = False
+    calib_stage_started_at = time.monotonic()
+    calib_stage_seconds = 10.0  # user requested ~10s to move eyes into position
+    calib_capture_window_seconds = 2.0
     calib_samples: list[tuple[float, float]] = []
-    calib_capture_count = 18
     collected_points: dict[str, tuple[float, float]] = {}
 
     slouch_since: Optional[float] = None
@@ -321,26 +333,36 @@ def run_monitor_loop(
             continue
 
         vis = vision.process(eye_frame)
-        # Guided calibration collection after pressing 'n'.
-        if (
-            calib_collecting
-            and vis.user_in_frame
-            and vis.eye_yaw_deg is not None
-            and vis.eye_pitch_deg is not None
-        ):
-            calib_samples.append((vis.eye_yaw_deg, vis.eye_pitch_deg))
-            if len(calib_samples) >= calib_capture_count:
-                avg_yaw = float(np.mean([v[0] for v in calib_samples]))
-                avg_pitch = float(np.mean([v[1] for v in calib_samples]))
+        # Guided timed calibration (automatic capture; no keypress needed).
+        if (not eye_calibrated) and (calib_target_index < len(calib_targets)):
+            elapsed = now - calib_stage_started_at
+            capture_start = max(0.0, calib_stage_seconds - calib_capture_window_seconds)
+
+            if (
+                elapsed >= capture_start
+                and vis.user_in_frame
+                and vis.eye_yaw_deg is not None
+                and vis.eye_pitch_deg is not None
+            ):
+                calib_samples.append((vis.eye_yaw_deg, vis.eye_pitch_deg))
+
+            if elapsed >= calib_stage_seconds:
                 target_name = calib_targets[calib_target_index]
-                collected_points[target_name] = (avg_yaw, avg_pitch)
-                print(
-                    f"[Bridge] Captured {target_name}: "
-                    f"{avg_yaw:+.1f}/{avg_pitch:+.1f}"
-                )
-                calib_samples = []
-                calib_collecting = False
-                calib_target_index += 1
+                if calib_samples:
+                    avg_yaw = float(np.mean([v[0] for v in calib_samples]))
+                    avg_pitch = float(np.mean([v[1] for v in calib_samples]))
+                    collected_points[target_name] = (avg_yaw, avg_pitch)
+                    print(
+                        f"[Bridge] Captured {target_name}: "
+                        f"{avg_yaw:+.1f}/{avg_pitch:+.1f}"
+                    )
+                    state.push_command(Command("beep", {}))
+                    calib_target_index += 1
+                    calib_samples = []
+                else:
+                    print(f"[Bridge] No valid samples for {target_name}; repeating target.")
+
+                calib_stage_started_at = now
 
                 if calib_target_index >= len(calib_targets):
                     center = collected_points["center"]
@@ -447,8 +469,11 @@ def run_monitor_loop(
                 next_alert_elapsed = CONFIG.first_alert_seconds
             distracted_for = 0.0
 
+        # Posture starts only after eye calibration is complete.
+        posture_active = eye_calibrated
+
         # Posture (pi external cam)
-        if posture_cap.isOpened() and posture.enabled:
+        if posture_cap.isOpened() and posture.enabled and posture_active:
             ok_posture, pframe = posture_cap.read()
             if ok_posture:
                 pres = posture.process(pframe)
@@ -477,15 +502,36 @@ def run_monitor_loop(
             pres = None
             slouch_for = 0.0
             pframe = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(
-                pframe,
-                "Posture camera unavailable",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 0, 255),
-                2,
-            )
+            if not posture_cap.isOpened():
+                cv2.putText(
+                    pframe,
+                    "Posture camera unavailable",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 255),
+                    2,
+                )
+            elif posture.enabled and (not posture_active):
+                cv2.putText(
+                    pframe,
+                    "Waiting for eye calibration...",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 255),
+                    2,
+                )
+            else:
+                cv2.putText(
+                    pframe,
+                    "Posture disabled",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 165, 255),
+                    2,
+                )
 
         state.set_metrics(
             user_in_frame=bool(vis.user_in_frame),
@@ -493,6 +539,7 @@ def run_monitor_loop(
             off_task=bool(off_task),
             off_task_seconds=float(distracted_for),
             posture_enabled=bool(posture.enabled and posture_cap.isOpened()),
+            posture_active=bool(posture_active),
             posture_calibrated=(None if pres is None else bool(pres.calibrated)),
             posture_good=(None if pres is None else pres.good_posture),
             posture_slouch_seconds=float(slouch_for),
@@ -507,7 +554,12 @@ def run_monitor_loop(
             if not eye_calibrated:
                 if calib_target_index < len(calib_targets):
                     target = calib_targets[calib_target_index].upper()
-                    calib_line = f"CALIBRATE: LOOK {target}, press N to capture ({calib_target_index+1}/{len(calib_targets)})"
+                    remaining = max(0.0, calib_stage_seconds - (now - calib_stage_started_at))
+                    calib_line = (
+                        f"CALIBRATE: LOOK {target} "
+                        f"({calib_target_index+1}/{len(calib_targets)}) "
+                        f"capture in {remaining:0.1f}s"
+                    )
                 else:
                     calib_line = "CALIBRATION: processing..."
                 cv2.putText(
@@ -519,10 +571,10 @@ def run_monitor_loop(
                     (255, 255, 0),
                     2,
                 )
-                if calib_collecting:
+                if calib_samples:
                     cv2.putText(
                         vis.frame,
-                        f"Capturing... {len(calib_samples)}/{calib_capture_count}",
+                        f"Capturing samples: {len(calib_samples)}",
                         (20, 455),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
@@ -570,16 +622,10 @@ def run_monitor_loop(
                 eye_calibrated = False
                 eye_profile = None
                 calib_target_index = 0
-                calib_collecting = False
                 calib_samples = []
                 collected_points = {}
-                print("[Bridge] Eye calibration reset. Use guided calibration with N.")
-            if key == ord("n"):
-                if not eye_calibrated and (not calib_collecting):
-                    calib_collecting = True
-                    calib_samples = []
-                    if calib_target_index < len(calib_targets):
-                        print(f"[Bridge] Capturing target: {calib_targets[calib_target_index]}")
+                calib_stage_started_at = now
+                print("[Bridge] Eye calibration reset. Timed guided calibration restarted.")
 
         time.sleep(0.03)
 
