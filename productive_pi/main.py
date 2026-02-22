@@ -7,6 +7,7 @@ import cv2
 from .config import CONFIG
 from .coach import CoachConfig, ProductivityCoach
 from .lcd import LcdDisplay
+from .led import FocusLed
 from .speech import VoiceAlerter, VoiceConfig
 from .state import ProductivityState
 from .vision import VisionEngine
@@ -50,6 +51,11 @@ def run(show_window: bool, fullscreen: bool) -> None:
         address=CONFIG.lcd_i2c_addr,
         cols=CONFIG.lcd_cols,
         rows=CONFIG.lcd_rows,
+    )
+    led = FocusLed(
+        enabled=CONFIG.led_enabled,
+        pin=CONFIG.led_pin,
+        active_high=CONFIG.led_active_high,
     )
     voice = VoiceAlerter(
         VoiceConfig(
@@ -145,6 +151,8 @@ def run(show_window: bool, fullscreen: bool) -> None:
                     thirty_second_alert_sent = False
                 distracted_for = 0.0
 
+            led.set_off_task(off_task)
+
             tip = coach.maybe_generate_tip(state)
             if tip:
                 print(f"[Coach] {tip}")
@@ -185,6 +193,7 @@ def run(show_window: bool, fullscreen: bool) -> None:
     finally:
         cap.release()
         lcd.close()
+        led.close()
         cv2.destroyAllWindows()
 
 

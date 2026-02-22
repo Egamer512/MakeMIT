@@ -3,4 +3,4 @@ numpy
 requests
 RPLCD
 smbus2
-ultralytics
+gpiozero

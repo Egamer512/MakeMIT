@@ -40,8 +40,8 @@ class AppConfig:
     lcd_cols: int = int(os.getenv("LCD_COLS", "16"))
     lcd_rows: int = int(os.getenv("LCD_ROWS", "2"))
 
-    # Ollama local model
-    ollama_enabled: bool = os.getenv("OLLAMA_ENABLED", "1") == "1"
+    # Ollama local model (disabled by default for Pi bring-up)
+    ollama_enabled: bool = os.getenv("OLLAMA_ENABLED", "0") == "1"
     ollama_url: str = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
     ollama_model: str = os.getenv("OLLAMA_MODEL", "gemma:2b")
     coach_interval_sec: int = int(os.getenv("COACH_INTERVAL_SEC", "60"))
@@ -72,6 +72,11 @@ class AppConfig:
     blink_eye_openness_threshold: float = float(os.getenv("BLINK_EYE_OPENNESS_THRESHOLD", "0.11"))
     gaze_off_grace_seconds: float = float(os.getenv("GAZE_OFF_GRACE_SECONDS", "0.8"))
     voice_test_on_start: bool = os.getenv("VOICE_TEST_ON_START", "0") == "1"
+
+    # LED alert on breadboard (off-task indicator)
+    led_enabled: bool = os.getenv("LED_ENABLED", "0") == "1"
+    led_pin: int = int(os.getenv("LED_PIN", "17"))  # BCM numbering by default
+    led_active_high: bool = os.getenv("LED_ACTIVE_HIGH", "1") == "1"
 
 
 CONFIG = AppConfig()

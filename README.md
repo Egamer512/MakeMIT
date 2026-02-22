@@ -1,97 +1,129 @@
-# Productivity Pi (Camera + LCD + Ollama)
+# Productivity Pi
 
-A Raspberry Pi app that encourages focused desk work by combining:
-- **Camera vision** (user presence + eye/gaze heuristics)
-- **LCD status display** (16x2 I2C)
-- **Interactive local coach** using **Ollama** (for example `gemma:2b`)
+Camera-based focus monitor for Raspberry Pi 5 with:
+- live camera overlay (`in frame`, gaze, eye angles)
+- off-task timer + voice escalation (10s and 30s)
+- optional 16x2 I2C LCD status
+- optional GPIO LED alert on breadboard when off-task
 
-## What it tracks
-- `user_in_frame`: whether a face is detected.
-- `eye_openness`: simple eye openness signal from eye bounding boxes.
-- `gaze_centered`: rough estimate that user is looking toward the monitor/work area.
-- `focus_score`: 0-100 score that rises when focused and drops when distracted.
+## Current logic
+Off-task is:
+- user out of frame, or
+- user in frame but gaze off for longer than grace window
 
-## Hardware
-- Raspberry Pi 4/5
-- Pi camera (or USB webcam)
-- 16x2 I2C LCD (common PCF8574 backpack)
+Blinks are ignored so natural blinking does not increment off-task timer.
 
-## Install
+## Raspberry Pi 5 first-time setup
+Run these on the Pi:
+
 ```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip python3-opencv libatlas-base-dev i2c-tools
+```
+
+Enable interfaces:
+```bash
+sudo raspi-config
+```
+Then:
+- `Interface Options` -> `I2C` -> `Enable`
+- `Interface Options` -> `Camera` -> `Enable` (if using Pi Camera module)
+
+Reboot:
+```bash
+sudo reboot
+```
+
+## Project setup on Pi
+```bash
+cd /path/to/Hackathon
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Configure via file (.env)
+## Configure with `.env`
+Create or edit `/Users/anfalhosen/Desktop/Hackathon/.env`.
+
+Recommended Pi baseline:
 ```bash
-cp .env.example .env
+# Camera
+CAMERA_INDEX=0
+FRAME_WIDTH=640
+FRAME_HEIGHT=480
+
+# Ollama disabled for now
+OLLAMA_ENABLED=0
+
+# Voice (ElevenLabs)
+VOICE_ENABLED=1
+VOICE_BACKEND=elevenlabs
+ELEVENLABS_ENABLED=1
+ELEVENLABS_API_KEY=your_real_key
+ELEVENLABS_VOICE_ID=your_voice_id
+ELEVENLABS_MODEL_ID=eleven_turbo_v2_5
+ELEVENLABS_FALLBACK_LOCAL=0
+VOICE_TEST_ON_START=1
+VOICE_DEBUG=1
+
+# Focus timing
+OFF_TASK_RESET_SECONDS=1.5
+BLINK_EYE_OPENNESS_THRESHOLD=0.11
+GAZE_OFF_GRACE_SECONDS=0.8
+
+# LCD (set 0 if not connected)
+LCD_ENABLED=1
+LCD_I2C_ADDR=0x27
+LCD_COLS=16
+LCD_ROWS=2
+
+# Breadboard LED (set 1 when wired)
+LED_ENABLED=1
+LED_PIN=17
+LED_ACTIVE_HIGH=1
 ```
-Then edit `.env` with your values (for ElevenLabs, set `ELEVENLABS_ENABLED=1` and your `ELEVENLABS_API_KEY`).
+
+## LED wiring (breadboard)
+Use BCM pin numbering.
+
+Example for `LED_PIN=17`:
+- Pi `GPIO17` (physical pin 11) -> 220 Ohm resistor -> LED anode (+)
+- LED cathode (-) -> GND (for example physical pin 6)
+
+If your LED is inverted due to wiring/transistor stage, set:
+```bash
+LED_ACTIVE_HIGH=0
+```
 
 ## Run
-```bash
-python3 -m productive_pi.main
-```
-
-Fullscreen on an external monitor:
+With display preview:
 ```bash
 python3 -m productive_pi.main --fullscreen
 ```
 
-Headless mode (no preview window):
+Headless:
 ```bash
 python3 -m productive_pi.main --headless
 ```
 
-While running the preview, the video overlay shows:
-- A top banner: `USER IN FRAME` or `USER NOT IN FRAME`
-- Eye metrics including estimated `EyeYaw` and `EyePitch` angles (degrees)
-- Focus/status and phone detection alerts
-
-## Environment config
-Defaults are in `/Users/anfalhosen/Desktop/Hackathon/productive_pi/config.py`, and each setting can be overridden with environment variables.
-
-Common examples:
+## Useful checks on Pi
+Check I2C device (LCD backpack):
 ```bash
-export CAMERA_INDEX=0
-export LCD_ENABLED=1
-export LCD_I2C_ADDR=0x27
-export OLLAMA_ENABLED=1
-export OLLAMA_MODEL=gemma:2b
-export OLLAMA_URL=http://127.0.0.1:11434/api/generate
-export VOICE_ENABLED=1
-export VOICE_BACKEND=local
-export LOCAL_VOICE_NAME=Samantha
-export DISTRACTION_VOICE_COOLDOWN_SECONDS=20
-
-# Optional later (disabled for now):
-# export ELEVENLABS_ENABLED=1
-# export ELEVENLABS_API_KEY=your_key_here
-# export ELEVENLABS_VOICE_ID=EXAVITQu4vr4xnSDxMaL
+i2cdetect -y 1
 ```
 
-## Ollama setup
-Install Ollama on the Pi and pull a small model:
+Quick camera check:
 ```bash
-ollama pull gemma:2b
+python3 - <<'PY'
+import cv2
+cap = cv2.VideoCapture(0)
+print('camera open:', cap.isOpened())
+cap.release()
+PY
 ```
-
-The app sends a short context prompt every `COACH_INTERVAL_SEC` and prints a concise tip.
 
 ## Notes
-- Vision currently uses OpenCV Haar cascades + pupil heuristics (works even when `mediapipe.solutions` is unavailable).
-- Voice alert defaults to free local TTS (`say` on macOS, `espeak`/`spd-say` on Linux) with no API key needed.
-- ElevenLabs is optional and only used when `ELEVENLABS_ENABLED=1`.
-- Off-task voice escalation currently speaks at 10s and 30s of continuous off-task time.
-- Off-task timer only resets after `OFF_TASK_RESET_SECONDS` of continuous on-task time (reduces flicker resets).
-- Natural blinks are ignored using `BLINK_EYE_OPENNESS_THRESHOLD`.
-- Gaze must be continuously off for `GAZE_OFF_GRACE_SECONDS` before off-task timing starts.
-- ElevenLabs playback on macOS uses built-in `afplay`; no extra player install required on Mac.
-- If ElevenLabs API fails, the app falls back to local TTS automatically.
-- Set `VOICE_TEST_ON_START=1` in `.env` to hear a startup voice check immediately.
-- Set `VOICE_DEBUG=1` to print exact voice backend/player/API diagnostics.
-- Set `ELEVENLABS_FALLBACK_LOCAL=0` to disable fallback and expose pure ElevenLabs errors.
-- If LCD init fails, the app continues without LCD output.
-- This scaffold is designed for extension (e.g., points, streaks, daily goals, web dashboard).
+- On Mac, LCD and GPIO errors are expected and safe.
+- ElevenLabs must have a valid API key; a `401 invalid_api_key` means key issue.
+- App reads `.env` automatically; shell exports can override `.env` values.
