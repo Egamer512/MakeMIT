@@ -229,6 +229,7 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
 
     gaze_off_since: Optional[float] = None
     distracted_since: Optional[float] = None
+    on_task_since: Optional[float] = None
     next_alert_elapsed = CONFIG.first_alert_seconds
     first_alert_fired = False
 
@@ -266,6 +267,7 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
 
         off_task = (not vis.user_in_frame) or gaze_off_long
         if off_task:
+            on_task_since = None
             if distracted_since is None:
                 distracted_since = now
                 next_alert_elapsed = CONFIG.first_alert_seconds
@@ -280,9 +282,12 @@ def run_monitor_loop(state: SharedState, posture_camera_index: int, show_windows
                 first_alert_fired = True
                 next_alert_elapsed += CONFIG.repeat_alert_seconds
         else:
-            distracted_since = None
-            first_alert_fired = False
-            next_alert_elapsed = CONFIG.first_alert_seconds
+            if on_task_since is None:
+                on_task_since = now
+            if (now - on_task_since) >= CONFIG.off_task_reset_seconds:
+                distracted_since = None
+                first_alert_fired = False
+                next_alert_elapsed = CONFIG.first_alert_seconds
             distracted_for = 0.0
 
         # Posture (pi external cam)
