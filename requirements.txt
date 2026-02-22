@@ -6,3 +6,4 @@ smbus2
 faster-whisper
 sounddevice
 ultralytics
+flask

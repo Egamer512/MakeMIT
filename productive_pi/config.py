@@ -24,10 +24,6 @@ _load_env_file()
 
 @dataclass
 class AppConfig:
-    # Eye-tracking camera input:
-    # - CAMERA_SOURCE can be webcam index ("0") or network URL (rtsp/http/udp).
-    # - If empty, CAMERA_INDEX is used.
-    camera_source: str = os.getenv("CAMERA_SOURCE", "").strip()
     camera_index: int = int(os.getenv("CAMERA_INDEX", "0"))
     frame_width: int = int(os.getenv("FRAME_WIDTH", "640"))
     frame_height: int = int(os.getenv("FRAME_HEIGHT", "480"))
@@ -105,9 +101,6 @@ class AppConfig:
     posture_alert_message: str = os.getenv("POSTURE_ALERT_MESSAGE", "Hey! let's fix that posture of yours.")
     posture_recover_reset_seconds: float = float(os.getenv("POSTURE_RECOVER_RESET_SECONDS", "1.5"))
     posture_debug: bool = os.getenv("POSTURE_DEBUG", "0") == "1"
-    # Optional separate camera input for posture (index or URL). If empty, uses eye camera feed.
-    posture_camera_source: str = os.getenv("POSTURE_CAMERA_SOURCE", "").strip()
-    posture_show_window: bool = os.getenv("POSTURE_SHOW_WINDOW", "1") == "1"
 
     # LED alert on breadboard (off-task indicator)
     led_enabled: bool = os.getenv("LED_ENABLED", "0") == "1"
