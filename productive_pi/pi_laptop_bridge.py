@@ -575,9 +575,11 @@ def run_monitor_loop(
                 collected_points = {}
                 print("[Bridge] Eye calibration reset. Use guided calibration with N.")
             if key == ord("n"):
-                if not eye_calibrated and (vis.eye_yaw_deg is not None) and (vis.eye_pitch_deg is not None):
+                if not eye_calibrated and (not calib_collecting):
                     calib_collecting = True
                     calib_samples = []
+                    if calib_target_index < len(calib_targets):
+                        print(f"[Bridge] Capturing target: {calib_targets[calib_target_index]}")
 
         time.sleep(0.03)
 
