@@ -240,6 +240,37 @@ def run(show_window: bool, fullscreen: bool) -> None:
                     (0, 0, 255),
                     2,
                 )
+            if posture_res.enabled:
+                if not posture_res.calibrated:
+                    cv2.putText(
+                        vis.frame,
+                        "Posture: calibrating (sit straight)",
+                        (20, 400),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 0),
+                        2,
+                    )
+                elif posture_res.good_posture is True:
+                    cv2.putText(
+                        vis.frame,
+                        "Posture: GOOD POSTURE",
+                        (20, 400),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 0),
+                        2,
+                    )
+                elif posture_res.good_posture is False:
+                    cv2.putText(
+                        vis.frame,
+                        "Posture: BAD POSTURE",
+                        (20, 400),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2,
+                    )
 
             if show_window:
                 cv2.imshow("Productivity Pi", vis.frame)
