@@ -24,6 +24,9 @@ class VisionEngine:
         self.eye_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_eye_tree_eyeglasses.xml"
         )
+        self._ema_dx = 0.0
+        self._ema_dy = 0.0
+        self._ema_alpha = 0.35
 
     @staticmethod
     def _safe_ratio(n: float, d: float) -> float:
@@ -44,18 +47,60 @@ class VisionEngine:
         return yaw_deg, pitch_deg
 
     @staticmethod
-    def _pupil_offset(eye_gray: np.ndarray) -> tuple[float, float]:
+    def _pupil_offset(eye_gray: np.ndarray) -> tuple[float, float, float, float]:
         if eye_gray.size == 0:
-            return 0.0, 0.0
-        blur = cv2.GaussianBlur(eye_gray, (7, 7), 0)
-        _, _, min_loc, _ = cv2.minMaxLoc(blur)
+            return 0.0, 0.0, 0.0, 0.0
+
         h, w = eye_gray.shape[:2]
         if w <= 0 or h <= 0:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
+
+        # Focus on central vertical band to reduce eyebrow noise.
+        y0 = int(0.15 * h)
+        y1 = int(0.85 * h)
+        crop = eye_gray[y0:y1, :]
+        if crop.size == 0:
+            crop = eye_gray
+            y0 = 0
+
+        blur = cv2.GaussianBlur(crop, (7, 7), 0)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        thresh = cv2.medianBlur(thresh, 5)
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cx, cy = w * 0.5, h * 0.5
-        dx = (float(min_loc[0]) - cx) / max(1.0, cx)
-        dy = (float(min_loc[1]) - cy) / max(1.0, cy)
-        return dx, dy
+        pupil_x = cx
+        pupil_y = cy
+
+        if contours:
+            best = None
+            best_score = 1e9
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area < 6 or area > 0.45 * w * h:
+                    continue
+                m = cv2.moments(c)
+                if abs(m["m00"]) < 1e-6:
+                    continue
+                x = (m["m10"] / m["m00"])
+                y = (m["m01"] / m["m00"]) + y0
+                # Prefer contours closer to center.
+                score = (x - cx) ** 2 + (y - cy) ** 2
+                if score < best_score:
+                    best_score = score
+                    best = (x, y)
+            if best is not None:
+                pupil_x, pupil_y = best
+            else:
+                _, _, min_loc, _ = cv2.minMaxLoc(cv2.GaussianBlur(eye_gray, (7, 7), 0))
+                pupil_x, pupil_y = float(min_loc[0]), float(min_loc[1])
+        else:
+            _, _, min_loc, _ = cv2.minMaxLoc(cv2.GaussianBlur(eye_gray, (7, 7), 0))
+            pupil_x, pupil_y = float(min_loc[0]), float(min_loc[1])
+
+        dx = (pupil_x - cx) / max(1.0, cx)
+        dy = (pupil_y - cy) / max(1.0, cy)
+        return dx, dy, pupil_x, pupil_y
 
     def process(self, frame: np.ndarray) -> VisionResult:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -90,21 +135,29 @@ class VisionEngine:
         for (ex, ey, ew, eh) in eye_candidates:
             cv2.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
             eye_gray = roi_gray[ey : ey + eh, ex : ex + ew]
-            dx, dy = self._pupil_offset(eye_gray)
+            dx, dy, px_local, py_local = self._pupil_offset(eye_gray)
             pupil_offsets.append((dx, dy))
 
-            # Draw pupil marker relative to the detected dark point.
-            px = int(ex + (dx + 1.0) * 0.5 * ew)
-            py = int(ey + (dy + 1.0) * 0.5 * eh)
-            cv2.circle(roi_color, (px, py), 3, (0, 0, 255), -1)
+            # Draw eye-center and pupil-center markers for alignment debugging.
+            cx_eye = int(ex + 0.5 * ew)
+            cy_eye = int(ey + 0.5 * eh)
+            cv2.drawMarker(roi_color, (cx_eye, cy_eye), (255, 255, 0), cv2.MARKER_CROSS, 8, 1)
+
+            px = int(ex + px_local)
+            py = int(ey + py_local)
+            cv2.rectangle(roi_color, (px - 3, py - 3), (px + 3, py + 3), (0, 0, 255), 1)
 
             eye_openness_vals.append(self._safe_ratio(float(eh), float(ew)))
 
         eye_openness = float(np.mean(eye_openness_vals)) if eye_openness_vals else 0.0
 
         if pupil_offsets:
-            mean_dx = float(np.mean([v[0] for v in pupil_offsets]))
-            mean_dy = float(np.mean([v[1] for v in pupil_offsets]))
+            mean_dx_raw = float(np.mean([v[0] for v in pupil_offsets]))
+            mean_dy_raw = float(np.mean([v[1] for v in pupil_offsets]))
+            self._ema_dx = (1.0 - self._ema_alpha) * self._ema_dx + self._ema_alpha * mean_dx_raw
+            self._ema_dy = (1.0 - self._ema_alpha) * self._ema_dy + self._ema_alpha * mean_dy_raw
+            mean_dx = self._ema_dx
+            mean_dy = self._ema_dy
             eye_yaw_deg, eye_pitch_deg = self._estimate_eye_angles(mean_dx, mean_dy)
             gaze_centered = abs(mean_dx) < 0.35 and abs(mean_dy) < 0.40 and eye_openness > 0.12
         else:
