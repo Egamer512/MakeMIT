@@ -130,19 +130,20 @@ class VoiceAlerter:
             with self._lock:
                 self._busy = False
 
-    def maybe_speak(self, text: str, force: bool = False) -> None:
+    def maybe_speak(self, text: str, force: bool = False) -> bool:
         if not self.cfg.enabled:
-            return
+            return False
 
         now = time.monotonic()
         if (not force) and (now - self._last_spoken < self.cfg.cooldown_seconds):
-            return
+            return False
 
         with self._lock:
             if self._busy:
-                return
+                return False
             self._busy = True
             self._last_spoken = now
 
         t = threading.Thread(target=self._speak_worker, args=(text,), daemon=True)
         t.start()
+        return True

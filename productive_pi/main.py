@@ -164,9 +164,11 @@ def run(show_window: bool, fullscreen: bool) -> None:
                         first_alert_fired = True
                     else:
                         msg = CONFIG.repeat_alert_message
-                    voice.maybe_speak(msg, force=True)
-                    print(f"[Voice] Triggered off-task alert at {next_alert_elapsed:.1f}s.")
-                    next_alert_elapsed += CONFIG.repeat_alert_seconds
+                    if voice.maybe_speak(msg, force=True):
+                        print(f"[Voice] Triggered off-task alert at {next_alert_elapsed:.1f}s.")
+                        next_alert_elapsed += CONFIG.repeat_alert_seconds
+                    else:
+                        break
             else:
                 if on_task_since is None:
                     on_task_since = now
@@ -184,9 +186,9 @@ def run(show_window: bool, fullscreen: bool) -> None:
                         slouch_since = now
                     slouch_for = now - slouch_since
                     if slouch_for >= CONFIG.posture_slouch_alert_seconds and not slouch_alert_sent:
-                        voice.maybe_speak(CONFIG.posture_alert_message, force=True)
-                        print(f"[Voice] Triggered posture alert at {slouch_for:.1f}s slouch.")
-                        slouch_alert_sent = True
+                        if voice.maybe_speak(CONFIG.posture_alert_message, force=True):
+                            print(f"[Voice] Triggered posture alert at {slouch_for:.1f}s slouch.")
+                            slouch_alert_sent = True
                 else:
                     if posture_good_since is None:
                         posture_good_since = now
