@@ -7,7 +7,6 @@ import cv2
 from .config import CONFIG
 from .coach import CoachConfig, ProductivityCoach
 from .lcd import LcdDisplay
-from .led import FocusLed
 from .speech import VoiceAlerter, VoiceConfig
 from .state import ProductivityState
 from .vision import VisionEngine
@@ -52,11 +51,12 @@ def run(show_window: bool, fullscreen: bool) -> None:
         cols=CONFIG.lcd_cols,
         rows=CONFIG.lcd_rows,
     )
-    led = FocusLed(
-        enabled=CONFIG.led_enabled,
-        pin=CONFIG.led_pin,
-        active_high=CONFIG.led_active_high,
-    )
+    # LED support is currently disabled.
+    # led = FocusLed(
+    #     enabled=CONFIG.led_enabled,
+    #     pin=CONFIG.led_pin,
+    #     active_high=CONFIG.led_active_high,
+    # )
     voice = VoiceAlerter(
         VoiceConfig(
             enabled=CONFIG.voice_enabled,
@@ -79,8 +79,8 @@ def run(show_window: bool, fullscreen: bool) -> None:
     distracted_since: Optional[float] = None
     on_task_since: Optional[float] = None
     gaze_off_since: Optional[float] = None
-    ten_second_alert_sent = False
-    thirty_second_alert_sent = False
+    next_alert_elapsed = CONFIG.first_alert_seconds
+    first_alert_fired = False
 
     if show_window:
         cv2.namedWindow("Productivity Pi", cv2.WINDOW_NORMAL)
@@ -132,26 +132,30 @@ def run(show_window: bool, fullscreen: bool) -> None:
                 on_task_since = None
                 if distracted_since is None:
                     distracted_since = now
+                    next_alert_elapsed = CONFIG.first_alert_seconds
+                    first_alert_fired = False
                 distracted_for = now - distracted_since
-                if distracted_for >= 10.0 and not ten_second_alert_sent:
-                    voice.maybe_speak("Hey Anfal, Please stay on task, remember that your pset is due soon!", force=True)
-                    print("[Voice] Triggered 10s off-task alert.")
-                    ten_second_alert_sent = True
-                if distracted_for >= 30.0 and not thirty_second_alert_sent:
-                    voice.maybe_speak("ANFAL! GET BACK TO WORK NOW.", force=True)
-                    print("[Voice] Triggered 30s off-task alert.")
-                    thirty_second_alert_sent = True
+                while distracted_for >= next_alert_elapsed:
+                    if not first_alert_fired:
+                        msg = CONFIG.first_alert_message
+                        first_alert_fired = True
+                    else:
+                        msg = CONFIG.repeat_alert_message
+                    voice.maybe_speak(msg, force=True)
+                    print(f"[Voice] Triggered off-task alert at {next_alert_elapsed:.1f}s.")
+                    next_alert_elapsed += CONFIG.repeat_alert_seconds
             else:
                 if on_task_since is None:
                     on_task_since = now
                 on_task_for = now - on_task_since
                 if on_task_for >= CONFIG.off_task_reset_seconds:
                     distracted_since = None
-                    ten_second_alert_sent = False
-                    thirty_second_alert_sent = False
+                    next_alert_elapsed = CONFIG.first_alert_seconds
+                    first_alert_fired = False
                 distracted_for = 0.0
 
-            led.set_off_task(off_task)
+            # LED support is currently disabled.
+            # led.set_off_task(off_task)
 
             tip = coach.maybe_generate_tip(state)
             if tip:
@@ -193,7 +197,8 @@ def run(show_window: bool, fullscreen: bool) -> None:
     finally:
         cap.release()
         lcd.close()
-        led.close()
+        # LED support is currently disabled.
+        # led.close()
         cv2.destroyAllWindows()
 
 

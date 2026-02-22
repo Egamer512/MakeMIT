@@ -72,6 +72,16 @@ class AppConfig:
     blink_eye_openness_threshold: float = float(os.getenv("BLINK_EYE_OPENNESS_THRESHOLD", "0.11"))
     gaze_off_grace_seconds: float = float(os.getenv("GAZE_OFF_GRACE_SECONDS", "0.8"))
     voice_test_on_start: bool = os.getenv("VOICE_TEST_ON_START", "0") == "1"
+    first_alert_seconds: float = float(os.getenv("FIRST_ALERT_SECONDS", "10"))
+    repeat_alert_seconds: float = float(os.getenv("REPEAT_ALERT_SECONDS", "30"))
+    first_alert_message: str = os.getenv(
+        "FIRST_ALERT_MESSAGE",
+        "Hey Anfal, Please stay on task, remember that your pset is due soon!",
+    )
+    repeat_alert_message: str = os.getenv(
+        "REPEAT_ALERT_MESSAGE",
+        "ANFAL! GET BACK TO WORK NOW.",
+    )
 
     # LED alert on breadboard (off-task indicator)
     led_enabled: bool = os.getenv("LED_ENABLED", "0") == "1"
